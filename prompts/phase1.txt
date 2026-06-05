@@ -1,0 +1,109 @@
+# 向量索引容錯研究 — Phase 1 手交文件
+
+給實作 agent：本文件自成一體，不需回看先前對話即可動工。前半是結論與已定案的作法，後半是任務層級的待辦清單。所有 code identifier（`qp/`、`regions.json` 等）沿用現有專案。
+
+---
+
+## 一、結論（研究框架與現況）
+
+### 研究問題（Direction 2）
+在「固定的物理錯誤率」之下，量化過的向量索引，其 recall 對 bit 翻轉是否比全精度索引更敏感？並進一步釐清：到底是哪些結構主宰了這個脆弱度。
+
+關鍵的精煉觀點：物理性 bit 翻轉是大致均勻地散落在整個索引佔用的記憶體上，並不挑語意。因此「一個隨機錯誤會不會傷到 recall」首先取決於——這個索引的總記憶體裡，真正與 recall 有關的資料佔多少比例。這個比例每個索引差很多，可能跟「有沒有量化」一樣重要。
+
+### Phase 0 現況（已完成、可直接沿用）
+- 在完整 SIFT1M 上建好 7 個索引，其中 5 個對齊到同一個乾淨 recall 操作點（FLAT 為精確搜尋，recall = 1.0；其餘約 0.95）。
+- IVF_PQ_M8 / M16 卡在 0.38 / 0.56（PQ ceiling，re-ranking 依設計關閉），無法對齊到共同操作點。
+- Substrate 已驗證：serialize→XOR→deserialize 的翻轉機制，round-trip 後 recall 重現到約 1e-5（執行緒雜訊）；failure-mode 分類器可區分 silent / nan-inf / crash；dry-run 確認 code/centroid/scale 的翻轉能乾淨反序列化，而 header/graph 結構的翻轉會觸發真正的 crash。
+- `qp/` 函式庫齊備：`config`（鎖定的控制變因）、`data`（SIFT 載入）、`metrics`（recall@{1,10,100} + tolerant recall + failure-mode 分類）、`flip`、`indexes`、`regions`。
+- Artifacts 已落地：7 個 index 檔、ground truth（10k×100 精確距離）、7 個 `regions.json`、baseline。
+
+Phase 0 baseline（faults/MB 正規化的中心參考表）：
+
+| index | knob | clean R@10 | tolerant R@10 | size (MB) |
+|---|---|---|---|---|
+| FLAT (ref) | exact | 1.0000 | 1.0000 | 512.0 |
+| IVF_FLAT | nprobe=21 | 0.9511 | 0.9883 | 520.5 |
+| IVF_SQ8 | nprobe=24 | 0.9505 | 0.9914 | 136.5 |
+| IVF_PQ_M8 | nprobe=128 | 0.3786* | 0.4221 | 16.7 |
+| IVF_PQ_M16 | nprobe=128 | 0.5621* | 0.6241 | 24.7 |
+| HNSW | efSearch=36 | 0.9523 | 0.9915 | 784.1 |
+| HNSW_SQ8 | efSearch=40 | 0.9513 | 0.9933 | 400.1 |
+
+\* PQ ceiling（re-ranking 關閉）；PQ 以自身 clean recall 為 baseline。
+
+### 已定案的作法
+1. **Phase 1 先只做「乾淨組」**：FLAT、IVF_FLAT、IVF_SQ8、HNSW、HNSW_SQ8。這五個有對齊基準，比較才解釋得通。組內含兩個只差一個變因的對照：
+   - **IVF_FLAT vs IVF_SQ8**：同一倒排檔結構、同一操作點，唯一差別是向量存成 32 位元浮點 vs 8 位元純量量化整數 → 核心假設最乾淨的一刀。
+   - **HNSW vs HNSW_SQ8**：同樣的變因差異，但發生在圖索引家族，用來判斷量化的影響是普遍還是索引特定，並銜接先前的 HNSW 成果。
+   - **FLAT** 為 fp32 精確參考。
+2. **翻轉前先做一個免費的前置分析（region accounting）**：用既有 `regions.json` 把每個索引的記憶體佔用分成「會影響 recall」「翻了會失效的結構」「無關」三類，重新賦予 faults/MB 主軸實際意義，並標出小而高槓桿的區域（PQ codebook、centroid、scale）。
+3. **只對「會影響 recall 的區域」注入**做 recall 研究；「翻了會失效的結構」單獨計為 failure-mode，不與 recall 損失混為一談。
+4. **量測重點看尾巴不看平均**：一百萬向量、一萬查詢，多數隨機翻轉打不中任何近鄰，平均值會被大量「零下降」稀釋；真正的訊號在 p99、最壞值、災難性比例與 failure-mode 計數。
+5. **PQ 列為延後決定，且不阻擋 Phase 1**（見第四節）。
+
+### 已定案的預測（供報告對照，非待辦）
+IVF_SQ8 與 HNSW_SQ8 用同一種純量量化、codes 大小一樣，但在同樣的每 MB 錯誤率下脆弱度可能差很多：HNSW_SQ8 約三分之二的記憶體是圖結構，隨機錯誤多落在可偵測的結構上；IVF_SQ8 幾乎整個佔用都是 codes，錯誤幾乎都直接傷 recall。
+
+---
+
+## 二、鎖定的控制變因與量測規格（agent 請勿改動）
+
+- 固定同一批 10k 查詢；主指標 k=10，另報 @1 / @100；ground truth 固定（10k×100 精確）。
+- IVF 家族同 nlist；各索引的 nprobe / efSearch 維持 Phase 0 調好的共同操作點（見 baseline 表）。
+- 乾淨組的 re-ranking / refine 一律關閉（refine 只保留給未來 PQ 的真實部署臂）。
+- 每個 (region × encoding × bit-position) cell 以隨機放置跑 N 次，報 mean ± 95% CI；記錄亂數種子確保可重現。
+- 每個索引以「自身的 clean recall」為 baseline，ΔRecall = clean − faulted。
+- 同時報傳統 recall 與 tolerant recall（避免把不相關鄰居的良性重排高估成損失）。
+- 失效型態三分類：silent / nan-inf / crash，分開計數。
+- nan/inf 在距離計算中的處理需定義成確定性行為並寫進文件（例如：視為被踢出結果，或單獨計數）。
+
+---
+
+## 三、待辦清單
+
+### 任務 A — Region accounting（前置分析，不翻任何 bit）
+- [ ] A1. 讀取全部 7 個 `regions/*.regions.json`。對每個索引，逐區域加總 byte 數，並把每個區域歸入三桶之一：
+  - `recall_relevant`：codes、codebook、centroid、sq_scale、原始浮點向量
+  - `crash_structure`：header、圖鄰接表 / links、翻了會 crash 或載入時被偵測的指標與 id
+  - `benign`：其餘填充或無關
+  - 桶的歸屬以 Phase 0 dry-run 的實測為準（哪些區域乾淨反序列化、哪些 crash）。
+- [ ] A2. 產出每個索引的彙總：total MB、各桶 MB 與占比。另外明列「小而高槓桿區域」（占比不到約 1%、但被大量向量共用或指向，如 PQ codebook、centroid、sq_scale），附上各自的 byte / bit 大小。
+- [ ] A3. 存成 `artifacts/region_accounting.{json,csv}` 以及一份簡短 markdown 摘要。
+- [ ] A4. 在摘要裡標出「IVF_SQ8 vs HNSW_SQ8 之 recall_relevant 占比落差」這個預測點，供後續報告引用。
+
+### 任務 B — Phase 1 單 bit 敏感度地圖（僅乾淨組）
+- [ ] B1. 範圍限定 5 個乾淨索引（FLAT、IVF_FLAT、IVF_SQ8、HNSW、HNSW_SQ8）；PQ 本輪排除。
+- [ ] B2. 對每個索引，取任務 A 標出的 `recall_relevant` 區域：
+  - 大宗區域（codes / 向量）：抽樣 S 個 bit 位置（建議 S 數量級為每區域數千、以能解析 p99 與尾巴為準；S 的取值與理由寫進文件）。
+  - 小而關鍵區域（centroid、sq_scale）：盡量近乎窮舉所有 bit 位置，直接取得 worst-case。
+- [ ] B3. 抽樣依「元素內 bit 位置」分層並記錄標籤：
+  - fp32 區域標為 sign / exponent / mantissa-high / mantissa-low
+  - SQ8 區域標為 bit index 7..0（MSB..LSB）
+  - 每筆量測都要附上這個位置標籤（不要只均勻抽再平均，否則 fp32 的雙峰與 SQ8 的 MSB/LSB 梯度會被藏掉）。
+- [ ] B4. 對每個被抽到的 bit：用既有 substrate 翻轉 → 用固定 10k 查詢在鎖定操作點重跑 → 計算 recall@{1,10,100} + tolerant recall → 分類 failure-mode → 還原。單 bit 逐一進行，每次之間還原。
+- [ ] B5. 每筆量測記錄：index、region、region_bits（該區域總 bit 數）、bit_position_tag、ΔRecall@{1,10,100}、tolerant ΔRecall、failure_mode。
+- [ ] B6. 依 (index × region × bit_position_tag) 彙總：mean / p99 / max ΔRecall；%benign（ΔRecall≈0）；%catastrophic（ΔRecall 超過門檻，門檻建議先取絕對 >0.01，數值與定義寫進文件）；failure-mode 計數。彙總須保留 region_bits 供 Phase 2 加權。
+- [ ] B7. 存原始逐筆紀錄（`artifacts/phase1/raw/`）與彙總地圖（`artifacts/phase1/vuln_map.{json,csv}`）。
+
+### 任務 C — 輸出與圖表
+- [ ] C1. 每索引 × 每區域的敏感度表（mean / p99 / max / %catastrophic）。
+- [ ] C2. bit 位置剖面圖：ΔRecall 對 bit_position_tag，呈現 fp32 的雙峰（sign/exponent 災難、mantissa-low 良性）與 SQ8 的 MSB/LSB 梯度；把 IVF_FLAT vs IVF_SQ8、HNSW vs HNSW_SQ8 分別疊在同一座標上對照。
+- [ ] C3. 每索引 / 每區域的 failure-mode 分布。
+
+### 任務 D — Sanity check 與護欄
+- [ ] D1. 抽樣確認「翻轉後還原」能把 recall 回到 clean baseline 的雜訊範圍內（約 1e-5），確保各次翻轉之間沒有狀態殘留。
+- [ ] D2. 確認 nan/inf 的處理為確定性且已寫進文件。
+- [ ] D3. 記錄所有亂數種子，抽樣可完全重現。
+- [ ] D4. 確認注入只落在 `recall_relevant` 區域；`crash_structure` 區域單獨小規模跑一次，刻畫 crash failure-mode 的觸發情形（本輪可選）。
+
+---
+
+## 四、延後決定（本輪不做，待我確認後再開）
+
+- **PQ 那一臂**：本輪 Phase 1 乾淨組不依賴它。待決定的兩條路線（可能兩條都做）：
+  1. 新增大 M 的 IVF_PQ（M=32 或 64）把純 PQ 拉到約 0.95 操作點，取得 apples-to-apples 的對照點（代價是壓縮比變小，正好可順勢掃「壓縮比 × 脆弱度」）。
+  2. 新增 IVF_PQ + refine（rerank）作為「真實部署臂」——因為實務上 PQ 幾乎都配 rerank，而 rerank 會根本改變 corruption 故事。
+  - 現有 M8 / M16 保留為「極端壓縮、以自身為 baseline」的資料點，解讀時標清楚 caveat。
+
+- **Phase 2（錯誤率掃描，以 faults/MB 正規化）**：直接接任務 A 的區域大小 + 任務 B 的單 bit 地圖，做「按區域大小加權」的彙總（量化索引佔用小 → 同樣每 MB 錯誤率下翻轉總數較少，此效果與「每次翻轉傷得更重」對沖）。待 Phase 1 落地後再開規格。

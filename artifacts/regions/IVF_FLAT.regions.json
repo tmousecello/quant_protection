@@ -1,0 +1,33 @@
+{
+  "index": "IVF_FLAT",
+  "total_bytes": 520532619,
+  "regions": [
+    {
+      "name": "header",
+      "kind": "header",
+      "byte_start": 0,
+      "byte_len": 98,
+      "dtype": "bytes",
+      "semantic": "fourcc magic + index parameters",
+      "located": false
+    },
+    {
+      "name": "centroid",
+      "kind": "centroid",
+      "byte_start": 98,
+      "byte_len": 524288,
+      "dtype": "float32",
+      "semantic": "IVF coarse-quantizer centroids",
+      "located": true
+    },
+    {
+      "name": "codes",
+      "kind": "codes",
+      "byte_start": 524386,
+      "byte_len": 520008233,
+      "dtype": "uint8",
+      "semantic": "inverted-list codes (estimated: tail after located metadata)",
+      "located": false
+    }
+  ]
+}

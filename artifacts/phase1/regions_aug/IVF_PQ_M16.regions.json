@@ -1,0 +1,42 @@
+{
+  "index": "IVF_PQ_M16",
+  "total_bytes": 24663732,
+  "regions": [
+    {
+      "name": "header",
+      "kind": "header",
+      "byte_start": 0,
+      "byte_len": 98,
+      "dtype": "bytes",
+      "semantic": "fourcc magic + index parameters",
+      "located": false
+    },
+    {
+      "name": "centroid",
+      "kind": "centroid",
+      "byte_start": 98,
+      "byte_len": 524288,
+      "dtype": "float32",
+      "semantic": "IVF coarse-quantizer centroids",
+      "located": true
+    },
+    {
+      "name": "pq_codebook",
+      "kind": "pq_codebook",
+      "byte_start": 524436,
+      "byte_len": 131072,
+      "dtype": "float32",
+      "semantic": "PQ sub-quantizer codebook",
+      "located": true
+    },
+    {
+      "name": "codes",
+      "kind": "codes",
+      "byte_start": 655508,
+      "byte_len": 24008224,
+      "dtype": "uint8",
+      "semantic": "inverted-list codes (estimated: tail after located metadata)",
+      "located": false
+    }
+  ]
+}

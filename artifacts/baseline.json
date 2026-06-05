@@ -1,0 +1,372 @@
+{
+  "meta": {
+    "dataset": "SIFT1M",
+    "n_base": 1000000,
+    "dim": 128,
+    "n_query": 10000,
+    "faiss_version": "1.14.2",
+    "seed": 1234,
+    "k": 10,
+    "operating_point": 0.95,
+    "target_band": [
+      0.945,
+      0.955
+    ],
+    "epsilon_tolerant": 0.02,
+    "nlist": 1024,
+    "M": 32,
+    "efConstruction": 200,
+    "refine_enabled": false,
+    "smoke": false
+  },
+  "indexes": [
+    {
+      "index": "FLAT",
+      "kind": "exact",
+      "quant": null,
+      "knob": null,
+      "knob_value": null,
+      "clean_recall@1": 1.0,
+      "clean_recall@10": 1.0,
+      "clean_recall@100": 1.0,
+      "tolerant_recall@10": 1.0,
+      "serialized_bytes": 512000045,
+      "serialized_MB": 512.000045,
+      "bytes_per_vector": 512.000045,
+      "target_met": true,
+      "build_seconds": 9.5367431640625e-07,
+      "n_regions": 2,
+      "tuning_curve": []
+    },
+    {
+      "index": "IVF_FLAT",
+      "kind": "ivf",
+      "quant": null,
+      "knob": "nprobe",
+      "knob_value": 21,
+      "clean_recall@1": 0.9704,
+      "clean_recall@10": 0.9511200000000001,
+      "clean_recall@100": 0.911512,
+      "tolerant_recall@10": 0.98828,
+      "serialized_bytes": 520532619,
+      "serialized_MB": 520.532619,
+      "bytes_per_vector": 520.532619,
+      "target_met": true,
+      "build_seconds": 1.5408620834350586,
+      "n_regions": 3,
+      "tuning_curve": [
+        [
+          1,
+          0.39771999999999996
+        ],
+        [
+          2,
+          0.5534399999999999
+        ],
+        [
+          4,
+          0.70835
+        ],
+        [
+          8,
+          0.83729
+        ],
+        [
+          16,
+          0.9272600000000001
+        ],
+        [
+          24,
+          0.9605499999999999
+        ],
+        [
+          20,
+          0.9475
+        ],
+        [
+          22,
+          0.95461
+        ],
+        [
+          21,
+          0.9511200000000001
+        ]
+      ]
+    },
+    {
+      "index": "IVF_SQ8",
+      "kind": "ivf",
+      "quant": "sq8",
+      "knob": "nprobe",
+      "knob_value": 24,
+      "clean_recall@1": 0.9597,
+      "clean_recall@10": 0.95053,
+      "clean_recall@100": 0.923027,
+      "tolerant_recall@10": 0.99142,
+      "serialized_bytes": 136533688,
+      "serialized_MB": 136.533688,
+      "bytes_per_vector": 136.533688,
+      "target_met": true,
+      "build_seconds": 1.6520278453826904,
+      "n_regions": 4,
+      "tuning_curve": [
+        [
+          1,
+          0.39716999999999997
+        ],
+        [
+          2,
+          0.5522199999999999
+        ],
+        [
+          4,
+          0.7058099999999999
+        ],
+        [
+          8,
+          0.83249
+        ],
+        [
+          16,
+          0.91931
+        ],
+        [
+          24,
+          0.95053
+        ],
+        [
+          20,
+          0.9383900000000001
+        ],
+        [
+          22,
+          0.94505
+        ],
+        [
+          23,
+          0.94791
+        ]
+      ]
+    },
+    {
+      "index": "IVF_PQ_M8",
+      "kind": "ivf",
+      "quant": "pq",
+      "knob": "nprobe",
+      "knob_value": 128,
+      "clean_recall@1": 0.2865,
+      "clean_recall@10": 0.37858,
+      "clean_recall@100": 0.465466,
+      "tolerant_recall@10": 0.42211,
+      "serialized_bytes": 16663732,
+      "serialized_MB": 16.663732,
+      "bytes_per_vector": 16.663732,
+      "target_met": false,
+      "build_seconds": 5.521113157272339,
+      "n_regions": 4,
+      "tuning_curve": [
+        [
+          1,
+          0.2548
+        ],
+        [
+          2,
+          0.30835
+        ],
+        [
+          4,
+          0.34653999999999996
+        ],
+        [
+          8,
+          0.36604000000000003
+        ],
+        [
+          16,
+          0.37517
+        ],
+        [
+          24,
+          0.37698
+        ],
+        [
+          32,
+          0.37789
+        ],
+        [
+          48,
+          0.37837
+        ],
+        [
+          64,
+          0.37853
+        ],
+        [
+          96,
+          0.37856999999999996
+        ],
+        [
+          128,
+          0.37858
+        ]
+      ]
+    },
+    {
+      "index": "IVF_PQ_M16",
+      "kind": "ivf",
+      "quant": "pq",
+      "knob": "nprobe",
+      "knob_value": 128,
+      "clean_recall@1": 0.4669,
+      "clean_recall@10": 0.5621,
+      "clean_recall@100": 0.638476,
+      "tolerant_recall@10": 0.62407,
+      "serialized_bytes": 24663732,
+      "serialized_MB": 24.663732,
+      "bytes_per_vector": 24.663732,
+      "target_met": false,
+      "build_seconds": 5.381352186203003,
+      "n_regions": 4,
+      "tuning_curve": [
+        [
+          1,
+          0.32486000000000004
+        ],
+        [
+          2,
+          0.41563
+        ],
+        [
+          4,
+          0.48536
+        ],
+        [
+          8,
+          0.52839
+        ],
+        [
+          16,
+          0.55084
+        ],
+        [
+          24,
+          0.55669
+        ],
+        [
+          32,
+          0.5596300000000001
+        ],
+        [
+          48,
+          0.56104
+        ],
+        [
+          64,
+          0.56181
+        ],
+        [
+          96,
+          0.5620499999999999
+        ],
+        [
+          128,
+          0.5621
+        ]
+      ]
+    },
+    {
+      "index": "HNSW",
+      "kind": "graph",
+      "quant": null,
+      "knob": "efSearch",
+      "knob_value": 36,
+      "clean_recall@1": 0.9745,
+      "clean_recall@10": 0.95231,
+      "clean_recall@100": 0.810416,
+      "tolerant_recall@10": 0.99146,
+      "serialized_bytes": 784129506,
+      "serialized_MB": 784.129506,
+      "bytes_per_vector": 784.129506,
+      "target_met": true,
+      "build_seconds": 137.8200240135193,
+      "n_regions": 3,
+      "tuning_curve": [
+        [
+          16,
+          0.86026
+        ],
+        [
+          32,
+          0.9429700000000001
+        ],
+        [
+          48,
+          0.97083
+        ],
+        [
+          40,
+          0.9599
+        ],
+        [
+          36,
+          0.9522299999999999
+        ],
+        [
+          34,
+          0.9477399999999999
+        ],
+        [
+          35,
+          0.9499299999999999
+        ]
+      ]
+    },
+    {
+      "index": "HNSW_SQ8",
+      "kind": "graph",
+      "quant": "sq8",
+      "knob": "efSearch",
+      "knob_value": 40,
+      "clean_recall@1": 0.9659,
+      "clean_recall@10": 0.95146,
+      "clean_recall@100": 0.829093,
+      "tolerant_recall@10": 0.99335,
+      "serialized_bytes": 400130566,
+      "serialized_MB": 400.130566,
+      "bytes_per_vector": 400.130566,
+      "target_met": true,
+      "build_seconds": 133.78241634368896,
+      "n_regions": 3,
+      "tuning_curve": [
+        [
+          16,
+          0.85566
+        ],
+        [
+          32,
+          0.9350400000000001
+        ],
+        [
+          48,
+          0.96115
+        ],
+        [
+          40,
+          0.9513400000000001
+        ],
+        [
+          36,
+          0.94397
+        ],
+        [
+          38,
+          0.94776
+        ],
+        [
+          39,
+          0.94946
+        ]
+      ]
+    }
+  ]
+}

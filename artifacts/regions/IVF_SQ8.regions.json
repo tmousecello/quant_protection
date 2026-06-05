@@ -1,0 +1,42 @@
+{
+  "index": "IVF_SQ8",
+  "total_bytes": 136533688,
+  "regions": [
+    {
+      "name": "header",
+      "kind": "header",
+      "byte_start": 0,
+      "byte_len": 98,
+      "dtype": "bytes",
+      "semantic": "fourcc magic + index parameters",
+      "located": false
+    },
+    {
+      "name": "centroid",
+      "kind": "centroid",
+      "byte_start": 98,
+      "byte_len": 524288,
+      "dtype": "float32",
+      "semantic": "IVF coarse-quantizer centroids",
+      "located": true
+    },
+    {
+      "name": "sq_scale",
+      "kind": "sq_scale",
+      "byte_start": 524431,
+      "byte_len": 1024,
+      "dtype": "float32",
+      "semantic": "scalar-quantizer vmin/vdiff per dim",
+      "located": true
+    },
+    {
+      "name": "codes",
+      "kind": "codes",
+      "byte_start": 525455,
+      "byte_len": 136008233,
+      "dtype": "uint8",
+      "semantic": "inverted-list codes (estimated: tail after located metadata)",
+      "located": false
+    }
+  ]
+}

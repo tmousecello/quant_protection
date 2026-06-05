@@ -1,0 +1,29 @@
+# quant_protection — 量化索引 bit-flip 敏感度研究 依賴
+# 平台: macOS arm64 / Python 3.13。faiss-cpu 釘版以確保 wheel 相容。
+
+# FAISS：單套件涵蓋設計矩陣全部 index 型態，並可序列化內部 bytes 做 bit-flip
+#   FLAT      -> IndexFlatL2
+#   IVF_FLAT  -> IndexIVFFlat
+#   IVF_SQ8   -> IndexIVFScalarQuantizer (QT_8bit)
+#   IVF_PQ    -> IndexIVFPQ (M=8/16, nbits=8)
+#   HNSW      -> IndexHNSWFlat
+#   HNSW_SQ8  -> IndexHNSWSQ
+faiss-cpu==1.14.2
+
+# fp32 HNSW 的交叉驗證實作（對接 first-try 的 HNSW 結論）
+hnswlib
+
+# 載入 fvecs/ivecs、直接翻 bit
+numpy
+
+# 95% CI、single-bit recall-drop 分布統計 (mean/p99/max, %benign/%catastrophic)
+scipy
+
+# 彙整各 cell 結果 (編碼 × fault 位置 × 錯誤率)
+pandas
+
+# 脆弱度地圖、ΔRecall–fault/MB 曲線
+matplotlib
+
+# 30–100 次隨機 fault 放置的進度條
+tqdm

@@ -1,0 +1,287 @@
+{
+  "meta": {
+    "dataset": "SIFT1M",
+    "seed": 1234,
+    "k": 10,
+    "operating_point": 0.95,
+    "note": "HNSW_SQ8 'codes' is an added estimated tail (located=false)."
+  },
+  "indexes": [
+    {
+      "index": "FLAT",
+      "total_bytes": 512000045,
+      "total_MB": 512.000045,
+      "buckets": {
+        "recall_relevant": {
+          "bytes": 512000000,
+          "MB": 512.0,
+          "pct": 99.99999121093828,
+          "regions": [
+            "vectors"
+          ]
+        },
+        "crash_structure": {
+          "bytes": 45,
+          "MB": 4.5e-05,
+          "pct": 8.789061727523871e-06,
+          "regions": [
+            "header"
+          ]
+        },
+        "benign": {
+          "bytes": 0,
+          "MB": 0.0,
+          "pct": 0.0,
+          "regions": []
+        }
+      },
+      "small_high_leverage": []
+    },
+    {
+      "index": "IVF_FLAT",
+      "total_bytes": 520532619,
+      "total_MB": 520.532619,
+      "buckets": {
+        "recall_relevant": {
+          "bytes": 520532521,
+          "MB": 520.532521,
+          "pct": 99.9999811731299,
+          "regions": [
+            "centroid",
+            "codes"
+          ]
+        },
+        "crash_structure": {
+          "bytes": 98,
+          "MB": 9.8e-05,
+          "pct": 1.8826870098605676e-05,
+          "regions": [
+            "header"
+          ]
+        },
+        "benign": {
+          "bytes": 0,
+          "MB": 0.0,
+          "pct": 0.0,
+          "regions": []
+        }
+      },
+      "small_high_leverage": [
+        {
+          "name": "centroid",
+          "bytes": 524288,
+          "bits": 4194304,
+          "pct": 0.10072144969650787
+        }
+      ]
+    },
+    {
+      "index": "IVF_SQ8",
+      "total_bytes": 136533688,
+      "total_MB": 136.533688,
+      "buckets": {
+        "recall_relevant": {
+          "bytes": 136533545,
+          "MB": 136.533545,
+          "pct": 99.99989526394394,
+          "regions": [
+            "centroid",
+            "sq_scale",
+            "codes"
+          ]
+        },
+        "crash_structure": {
+          "bytes": 98,
+          "MB": 9.8e-05,
+          "pct": 7.177715729761874e-05,
+          "regions": [
+            "header"
+          ]
+        },
+        "benign": {
+          "bytes": 45,
+          "MB": 4.5e-05,
+          "pct": 3.2958898759110644e-05,
+          "regions": [
+            "unaccounted"
+          ]
+        }
+      },
+      "small_high_leverage": [
+        {
+          "name": "centroid",
+          "bytes": 524288,
+          "bits": 4194304,
+          "pct": 0.38399900250259117
+        },
+        {
+          "name": "sq_scale",
+          "bytes": 1024,
+          "bits": 8192,
+          "pct": 0.0007499980517628734
+        }
+      ]
+    },
+    {
+      "index": "IVF_PQ_M8",
+      "total_bytes": 16663732,
+      "total_MB": 16.663732,
+      "buckets": {
+        "recall_relevant": {
+          "bytes": 16663584,
+          "MB": 16.663584,
+          "pct": 99.99911184361342,
+          "regions": [
+            "centroid",
+            "pq_codebook",
+            "codes"
+          ]
+        },
+        "crash_structure": {
+          "bytes": 98,
+          "MB": 9.8e-05,
+          "pct": 0.0005881035532736605,
+          "regions": [
+            "header"
+          ]
+        },
+        "benign": {
+          "bytes": 50,
+          "MB": 5e-05,
+          "pct": 0.000300052833302888,
+          "regions": [
+            "unaccounted"
+          ]
+        }
+      },
+      "small_high_leverage": [
+        {
+          "name": "pq_codebook",
+          "bytes": 131072,
+          "bits": 1048576,
+          "pct": 0.7865704993335226
+        }
+      ]
+    },
+    {
+      "index": "IVF_PQ_M16",
+      "total_bytes": 24663732,
+      "total_MB": 24.663732,
+      "buckets": {
+        "recall_relevant": {
+          "bytes": 24663584,
+          "MB": 24.663584,
+          "pct": 99.99939992860772,
+          "regions": [
+            "centroid",
+            "pq_codebook",
+            "codes"
+          ]
+        },
+        "crash_structure": {
+          "bytes": 98,
+          "MB": 9.8e-05,
+          "pct": 0.0003973445705621517,
+          "regions": [
+            "header"
+          ]
+        },
+        "benign": {
+          "bytes": 50,
+          "MB": 5e-05,
+          "pct": 0.00020272682171538353,
+          "regions": [
+            "unaccounted"
+          ]
+        }
+      },
+      "small_high_leverage": [
+        {
+          "name": "pq_codebook",
+          "bytes": 131072,
+          "bits": 1048576,
+          "pct": 0.531436199517575
+        }
+      ]
+    },
+    {
+      "index": "HNSW",
+      "total_bytes": 784129506,
+      "total_MB": 784.129506,
+      "buckets": {
+        "recall_relevant": {
+          "bytes": 512000000,
+          "MB": 512.0,
+          "pct": 65.29533655885665,
+          "regions": [
+            "vectors"
+          ]
+        },
+        "crash_structure": {
+          "bytes": 272129441,
+          "MB": 272.129441,
+          "pct": 34.70465515169633,
+          "regions": [
+            "graph_meta",
+            "graph_edges"
+          ]
+        },
+        "benign": {
+          "bytes": 65,
+          "MB": 6.5e-05,
+          "pct": 8.289447024073597e-06,
+          "regions": [
+            "unaccounted"
+          ]
+        }
+      },
+      "small_high_leverage": []
+    },
+    {
+      "index": "HNSW_SQ8",
+      "total_bytes": 400130566,
+      "total_MB": 400.130566,
+      "buckets": {
+        "recall_relevant": {
+          "bytes": 128001032,
+          "MB": 128.001032,
+          "pct": 31.989816044195933,
+          "regions": [
+            "sq_scale",
+            "codes"
+          ]
+        },
+        "crash_structure": {
+          "bytes": 272129441,
+          "MB": 272.129441,
+          "pct": 68.01016071339073,
+          "regions": [
+            "graph_meta",
+            "graph_edges"
+          ]
+        },
+        "benign": {
+          "bytes": 93,
+          "MB": 9.3e-05,
+          "pct": 2.3242413327653654e-05,
+          "regions": [
+            "unaccounted"
+          ]
+        }
+      },
+      "small_high_leverage": [
+        {
+          "name": "sq_scale",
+          "bytes": 1024,
+          "bits": 8192,
+          "pct": 0.0002559164650270682
+        }
+      ]
+    }
+  ],
+  "prediction_gap": {
+    "IVF_SQ8_recall_relevant_pct": 99.99989526394394,
+    "HNSW_SQ8_recall_relevant_pct": 31.989816044195933,
+    "delta": 68.01007921974801
+  }
+}

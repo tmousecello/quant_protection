@@ -1,0 +1,33 @@
+{
+  "index": "HNSW_SQ8",
+  "total_bytes": 400130566,
+  "regions": [
+    {
+      "name": "graph_meta",
+      "kind": "graph_meta",
+      "byte_start": 0,
+      "byte_len": 12000161,
+      "dtype": "mixed",
+      "semantic": "HNSW params/levels/offsets, entry_point=118295, max_level=4 (estimated: header..edges)",
+      "located": false
+    },
+    {
+      "name": "graph_edges",
+      "kind": "graph_edges",
+      "byte_start": 12000161,
+      "byte_len": 260129280,
+      "dtype": "int32",
+      "semantic": "HNSW neighbor adjacency table",
+      "located": true
+    },
+    {
+      "name": "sq_scale",
+      "kind": "sq_scale",
+      "byte_start": 272129534,
+      "byte_len": 1024,
+      "dtype": "float32",
+      "semantic": "scalar-quantizer vmin/vdiff per dim (HNSW SQ storage)",
+      "located": true
+    }
+  ]
+}

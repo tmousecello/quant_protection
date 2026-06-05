@@ -1,0 +1,24 @@
+{
+  "index": "FLAT",
+  "total_bytes": 512000045,
+  "regions": [
+    {
+      "name": "header",
+      "kind": "header",
+      "byte_start": 0,
+      "byte_len": 45,
+      "dtype": "bytes",
+      "semantic": "fourcc magic + index parameters",
+      "located": false
+    },
+    {
+      "name": "vectors",
+      "kind": "vectors",
+      "byte_start": 45,
+      "byte_len": 512000000,
+      "dtype": "float32",
+      "semantic": "fp32 base vectors (exact storage)",
+      "located": true
+    }
+  ]
+}

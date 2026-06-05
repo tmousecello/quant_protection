@@ -1,0 +1,39 @@
+## Intro（研究動機與定位）
+
+量化現在是生產級向量資料庫的預設選項，因為它能大幅省記憶體、而 recall 的代價通常很小——int8 量化相對全精度的 recall 落差可能只在 1.5% 左右。但這個「代價很小」講的全是**壓縮本身的近似誤差**，沒有人問過另一個問題：當記憶體裡的 index 被 bit 翻轉（DRAM soft error、Rowhammer、儲存毀損）時，量化過的索引對 recall 的損害是不是比全精度更敏感？這個缺口很明顯——在神經網路領域，bit-flip 與 silent data corruption 的研究已經成熟，但結論其實**取決於 fault model**：在電磁注入下浮點表示單次故障就幾乎完全崩潰，整數（量化）反而較耐受，而 在針對性 bit-flip 攻擊下量化網路又比全精度耐打，量化甚至被當成防禦手段。這個矛盾還沒有人在向量檢索上釐清。同時，向量資料庫這邊現有的可靠度研究（如 P-HNSW）做的是 crash consistency——當機後復原部分寫入的結構，而不是靜默損毀對 recall 的影響。
+
+本實驗的作法基於三個設計原則。第一，**隔離編碼這個變因**：用同一套 IVF 結構只換編碼（IVF_FLAT vs SQ8 vs PQ）來比較，避免把「演算法差異」誤算成「量化差異」。第二，**用物理錯誤率（faults/MB）當主軸正規化**，而不是「翻了幾個 bit」——因為硬體實際遞送的是每位元的錯誤率，量化雖然每個 bit 更承重，但 footprint 小、被打到的絕對次數也少，這兩股力量的淨效果才是資料保護真正關心、也尚未被量過的問題。第三，**先建單 bit 敏感度地圖、再做錯誤率掃描**，並同時報傳統與 tolerant recall，因為 tolerant recall 對只是重排不相關鄰居的微小擾動較不敏感，可避免把良性洗牌高估成 recall 損失。
+
+
+## 環境建立
+sift 資料集已經下載，並且放在 /sift
+
+## 設計矩陣
+
+| 因子 | levels（具體值） | 角色 |
+|---|---|---|
+| **編碼 / index** | FLAT (fp32 暴力)、IVF_FLAT (fp32)、IVF_SQ8、IVF_PQ (M=8/16, nbits=8)、HNSW (fp32)、HNSW_SQ8；（選配）RaBitQ/binary | 主自變數。IVF 家族內比 = isolate 編碼；FLAT↔HNSW = isolate 圖結構 |
+| **fault 位置** | (a) 向量/codes　(b) codebook / IVF centroid / SQ scale　(c) graph 邊：hub vs non-hub　(d) entry point / metadata | 定位高價值結構；對 fp32 另記 sign/exponent/mantissa 位 |
+| **正規化** | (1) per bit　(2) per bit-fraction　(3) **per fault/MB ←主軸**　(4) per 等 recall footprint | 決定結論 trivial 與否 |
+| **fault model** | single-bit（建敏感度分布）；random multi-bit rate sweep r ∈ {1e-6 … 1e-3}；（選配）targeted | 同時記錄失效型態 |
+| **資料集** | SIFT1M (128d)、GIST1M (960d)、一組文字 embedding (~768d, 如 MS MARCO/DBpedia) | 維度與模態泛化 |
+
+## 對照設計（哪些 cell 回答哪個子問題）
+
+| 子問題 | 對照軸 |
+|---|---|
+| Q1　量化是否更敏感？ | 編碼軸 × 正規化(3) × 位置(a)，比各 index 的 ΔRecall–fault/MB 斜率 |
+| Q2　哪個結構主宰風險？ | 位置軸 × single-bit 敏感度分布（找出 codebook/centroid/hub 的放大效應） |
+| Q3　冗餘在編碼還是圖結構？ | FLAT↔HNSW（圖）、IVF_FLAT↔IVF_SQ8/PQ（編碼），對接你之前的 HNSW 結論 |
+
+## 受控變因（一定要鎖死）
+
+固定 query set（10k）、k=10、ground truth 不變；IVF 家族同 nlist (建議 1024) 與 nprobe，圖同 M (16/32)、efConstruction、efSearch。關鍵：**先調參讓各 index 的 clean recall 對齊到同一操作點（如 ≈0.95），比的是「敏感度」而非各自不同的 baseline**。refine / re-rank 預設**關閉**（若開，因為它用原始 fp32 重排會整個改變 corruption 故事，必須當成獨立 condition）。每個 cell 跑 30–100 次隨機 fault 放置，報 mean ± 95% CI。
+
+## 應變數
+
+Recall@{1,10,100} 與相對各自 clean 的 ΔRecall；敏感度 = dRecall/d(fault/MB) 斜率；single-bit 的 recall-drop 分布（mean、p99、max、%benign、%catastrophic）；tolerant/semantic recall；**分開統計 silent-wrong / nan-inf / crash 三種失效型態**；QPS 變化（次要，銜接你 graph「只影響速度」的發現）。
+
+## 執行階段（讓它真的跑得動）
+
+Phase 0 建 index、對齊 clean recall 操作點、存 baseline 與 ground truth。Phase 1 跑單 bit 敏感度地圖（位置 × 編碼，每結構抽樣 S 個 bit 位置）→ 產出脆弱度地圖。Phase 2 錯誤率掃描 + 物理錯誤率正規化 → 核心曲線。Phase 3 解釋失效型態（nan/inf、hub 放大），直接接到保護策略（方向 3）。工具用 FAISS + hnswlib/FlatNav，全程 numpy 直接翻 bit。

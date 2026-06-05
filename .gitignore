@@ -1,0 +1,37 @@
+# quant_protection — version-control only code + small text results.
+# Large/regenerable artifacts stay out of git (rebuild on the workstation; see WORKSTATION.md).
+# NOTE: gitignore does not support trailing/inline comments — keep every pattern on its own line.
+
+# --- Python / venv / OS ---
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# --- logs ---
+*.log
+
+# --- dataset (550M; fetch with fetch_sift.sh from the public SIFT1M mirror) ---
+sift/
+
+# --- smoke-run outputs (disposable) ---
+artifacts_smoke/
+
+# --- heavy / regenerable artifacts (rebuilt by phase0_build.py / phase1_*.py) ---
+# 2.2G of .faissindex
+artifacts/indexes/
+# binary npy ground truth
+artifacts/gt/
+# per-flip jsonl shards (can grow large on a full run)
+artifacts/phase1/raw/
+# png figures
+artifacts/phase1/charts/
+
+# Everything else under artifacts/ IS tracked on purpose (small text results):
+#   artifacts/baseline.{json,csv}
+#   artifacts/regions/*.regions.json
+#   artifacts/region_accounting.{json,csv,md}
+#   artifacts/phase1/regions_aug/*.regions.json
+#   artifacts/phase1/vuln_map.{json,csv}
+#   artifacts/phase1/sensitivity_table.{csv,md}
+#   artifacts/phase1/failure_modes.csv

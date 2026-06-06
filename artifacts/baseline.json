@@ -34,7 +34,7 @@
       "serialized_MB": 512.000045,
       "bytes_per_vector": 512.000045,
       "target_met": true,
-      "build_seconds": 9.5367431640625e-07,
+      "build_seconds": 4.76837158203125e-07,
       "n_regions": 2,
       "tuning_curve": []
     },
@@ -45,14 +45,14 @@
       "knob": "nprobe",
       "knob_value": 21,
       "clean_recall@1": 0.9704,
-      "clean_recall@10": 0.9511200000000001,
-      "clean_recall@100": 0.911512,
-      "tolerant_recall@10": 0.98828,
+      "clean_recall@10": 0.95114,
+      "clean_recall@100": 0.911519,
+      "tolerant_recall@10": 0.98829,
       "serialized_bytes": 520532619,
       "serialized_MB": 520.532619,
       "bytes_per_vector": 520.532619,
       "target_met": true,
-      "build_seconds": 1.5408620834350586,
+      "build_seconds": 1.224677562713623,
       "n_regions": 3,
       "tuning_curve": [
         [
@@ -89,7 +89,7 @@
         ],
         [
           21,
-          0.9511200000000001
+          0.95114
         ]
       ]
     },
@@ -99,7 +99,7 @@
       "quant": "sq8",
       "knob": "nprobe",
       "knob_value": 24,
-      "clean_recall@1": 0.9597,
+      "clean_recall@1": 0.9596,
       "clean_recall@10": 0.95053,
       "clean_recall@100": 0.923027,
       "tolerant_recall@10": 0.99142,
@@ -107,7 +107,7 @@
       "serialized_MB": 136.533688,
       "bytes_per_vector": 136.533688,
       "target_met": true,
-      "build_seconds": 1.6520278453826904,
+      "build_seconds": 1.2994129657745361,
       "n_regions": 4,
       "tuning_curve": [
         [
@@ -153,61 +153,61 @@
       "kind": "ivf",
       "quant": "pq",
       "knob": "nprobe",
-      "knob_value": 128,
-      "clean_recall@1": 0.2865,
-      "clean_recall@10": 0.37858,
-      "clean_recall@100": 0.465466,
-      "tolerant_recall@10": 0.42211,
+      "knob_value": 96,
+      "clean_recall@1": 0.2891,
+      "clean_recall@10": 0.37926000000000004,
+      "clean_recall@100": 0.46515500000000004,
+      "tolerant_recall@10": 0.42269,
       "serialized_bytes": 16663732,
       "serialized_MB": 16.663732,
       "bytes_per_vector": 16.663732,
       "target_met": false,
-      "build_seconds": 5.521113157272339,
+      "build_seconds": 3.514784574508667,
       "n_regions": 4,
       "tuning_curve": [
         [
           1,
-          0.2548
+          0.25518
         ],
         [
           2,
-          0.30835
+          0.30844
         ],
         [
           4,
-          0.34653999999999996
+          0.3463
         ],
         [
           8,
-          0.36604000000000003
+          0.36616
         ],
         [
           16,
-          0.37517
+          0.37568999999999997
         ],
         [
           24,
-          0.37698
+          0.3776
         ],
         [
           32,
-          0.37789
+          0.37845
         ],
         [
           48,
-          0.37837
+          0.37894
         ],
         [
           64,
-          0.37853
+          0.37917999999999996
         ],
         [
           96,
-          0.37856999999999996
+          0.37926000000000004
         ],
         [
           128,
-          0.37858
+          0.37926000000000004
         ]
       ]
     },
@@ -217,60 +217,60 @@
       "quant": "pq",
       "knob": "nprobe",
       "knob_value": 128,
-      "clean_recall@1": 0.4669,
-      "clean_recall@10": 0.5621,
-      "clean_recall@100": 0.638476,
-      "tolerant_recall@10": 0.62407,
+      "clean_recall@1": 0.4666,
+      "clean_recall@10": 0.563,
+      "clean_recall@100": 0.63837,
+      "tolerant_recall@10": 0.62513,
       "serialized_bytes": 24663732,
       "serialized_MB": 24.663732,
       "bytes_per_vector": 24.663732,
       "target_met": false,
-      "build_seconds": 5.381352186203003,
+      "build_seconds": 1.8075838088989258,
       "n_regions": 4,
       "tuning_curve": [
         [
           1,
-          0.32486000000000004
+          0.32477999999999996
         ],
         [
           2,
-          0.41563
+          0.41522
         ],
         [
           4,
-          0.48536
+          0.48589000000000004
         ],
         [
           8,
-          0.52839
+          0.529
         ],
         [
           16,
-          0.55084
+          0.5513600000000001
         ],
         [
           24,
-          0.55669
+          0.55741
         ],
         [
           32,
-          0.5596300000000001
+          0.56025
         ],
         [
           48,
-          0.56104
+          0.56196
         ],
         [
           64,
-          0.56181
+          0.5626800000000001
         ],
         [
           96,
-          0.5620499999999999
+          0.56296
         ],
         [
           128,
-          0.5621
+          0.563
         ]
       ]
     },
@@ -280,44 +280,44 @@
       "quant": null,
       "knob": "efSearch",
       "knob_value": 36,
-      "clean_recall@1": 0.9745,
-      "clean_recall@10": 0.95231,
-      "clean_recall@100": 0.810416,
-      "tolerant_recall@10": 0.99146,
+      "clean_recall@1": 0.9728,
+      "clean_recall@10": 0.95171,
+      "clean_recall@100": 0.809828,
+      "tolerant_recall@10": 0.9915,
       "serialized_bytes": 784129506,
       "serialized_MB": 784.129506,
       "bytes_per_vector": 784.129506,
       "target_met": true,
-      "build_seconds": 137.8200240135193,
+      "build_seconds": 42.345000982284546,
       "n_regions": 3,
       "tuning_curve": [
         [
           16,
-          0.86026
+          0.85943
         ],
         [
           32,
-          0.9429700000000001
+          0.94221
         ],
         [
           48,
-          0.97083
+          0.9700900000000001
         ],
         [
           40,
-          0.9599
+          0.95906
         ],
         [
           36,
-          0.9522299999999999
+          0.95164
         ],
         [
           34,
-          0.9477399999999999
+          0.94709
         ],
         [
           35,
-          0.9499299999999999
+          0.9496499999999999
         ]
       ]
     },
@@ -327,44 +327,44 @@
       "quant": "sq8",
       "knob": "efSearch",
       "knob_value": 40,
-      "clean_recall@1": 0.9659,
-      "clean_recall@10": 0.95146,
-      "clean_recall@100": 0.829093,
-      "tolerant_recall@10": 0.99335,
+      "clean_recall@1": 0.9646,
+      "clean_recall@10": 0.95136,
+      "clean_recall@100": 0.8287260000000001,
+      "tolerant_recall@10": 0.99333,
       "serialized_bytes": 400130566,
       "serialized_MB": 400.130566,
       "bytes_per_vector": 400.130566,
       "target_met": true,
-      "build_seconds": 133.78241634368896,
+      "build_seconds": 22.721322536468506,
       "n_regions": 3,
       "tuning_curve": [
         [
           16,
-          0.85566
+          0.85444
         ],
         [
           32,
-          0.9350400000000001
+          0.9353400000000001
         ],
         [
           48,
-          0.96115
+          0.96126
         ],
         [
           40,
-          0.9513400000000001
+          0.9512700000000001
         ],
         [
           36,
-          0.94397
+          0.94411
         ],
         [
           38,
-          0.94776
+          0.9480299999999999
         ],
         [
           39,
-          0.94946
+          0.94987
         ]
       ]
     }

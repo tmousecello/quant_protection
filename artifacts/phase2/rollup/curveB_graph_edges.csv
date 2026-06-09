@@ -1,0 +1,11 @@
+index,baseline_mode,r,cat_bits_total,P_collapse
+HNSW,aligned,1e-09,0.0,0.0
+HNSW,aligned,1e-08,0.0,0.0
+HNSW,aligned,1e-07,0.0,0.0
+HNSW,aligned,1e-06,0.0,0.0
+HNSW,aligned,1e-05,0.0,0.0
+HNSW_SQ8,aligned,1e-09,0.0,0.0
+HNSW_SQ8,aligned,1e-08,0.0,0.0
+HNSW_SQ8,aligned,1e-07,0.0,0.0
+HNSW_SQ8,aligned,1e-06,0.0,0.0
+HNSW_SQ8,aligned,1e-05,0.0,0.0

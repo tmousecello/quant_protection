@@ -64,6 +64,8 @@ python phase1_report.py                          # C1 表 + C2/C3 圖
 
 ```bash
 source .venv/bin/activate
+# step0: 補 IVF_SQ8
+python phase1_sensitivity.py --aggregate-only
 
 # Tier 1(PQ 敏感度)與 Tier 2(graph_edges)互相獨立,可平行;皆 --resume 可斷點續跑
 nohup python phase2_pq_sensitivity.py    --resume > t1.log 2>&1 &

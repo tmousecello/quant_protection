@@ -1,0 +1,11 @@
+index,baseline_mode,r,expected_dRecall@10
+HNSW,aligned,1e-09,-3.554285636231654e-08
+HNSW,aligned,1e-08,-3.554285636231654e-07
+HNSW,aligned,1e-07,-3.5542856362316538e-06
+HNSW,aligned,1e-06,-3.5542856362316535e-05
+HNSW,aligned,1e-05,-0.0003554285636231654
+HNSW_SQ8,aligned,1e-09,0.0
+HNSW_SQ8,aligned,1e-08,0.0
+HNSW_SQ8,aligned,1e-07,0.0
+HNSW_SQ8,aligned,1e-06,0.0
+HNSW_SQ8,aligned,1e-05,0.0

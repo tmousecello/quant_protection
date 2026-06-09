@@ -1,0 +1,7 @@
+index,region,bit_position_tag,region_bits,n,n_samples,pct_crash,pct_silent_benign,pct_silent_harmful,pct_nan_inf,mean_dR@10,p99_dR@10,max_dR@10,n_crash,n_silent_wrong,n_nan_inf,n_clean,harmful_thresh,baseline_mode,seed
+HNSW,graph_edges,ALL,2081034240,4000,4000,70.725,29.275,0.0,0.0,-1.70794192998557e-08,0.0,9.99999999995449e-06,2829,1,0,1170,0.01,aligned,1234
+HNSW,graph_edges,id_high,2081034240,2000,2000,89.15,10.85,0.0,0.0,0.0,0.0,0.0,1783,0,0,217,0.01,aligned,1234
+HNSW,graph_edges,id_low,2081034240,2000,2000,52.3,47.7,0.0,0.0,-2.0964360587139437e-08,0.0,9.99999999995449e-06,1046,1,0,953,0.01,aligned,1234
+HNSW_SQ8,graph_edges,ALL,2081034240,4000,4000,71.225,28.775,0.0,0.0,0.0,0.0,0.0,2849,0,0,1151,0.01,aligned,1234
+HNSW_SQ8,graph_edges,id_high,2081034240,2000,2000,88.9,11.1,0.0,0.0,0.0,0.0,0.0,1778,0,0,222,0.01,aligned,1234
+HNSW_SQ8,graph_edges,id_low,2081034240,2000,2000,53.55,46.45,0.0,0.0,0.0,0.0,0.0,1071,0,0,929,0.01,aligned,1234

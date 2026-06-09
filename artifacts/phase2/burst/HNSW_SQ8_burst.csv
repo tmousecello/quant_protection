@@ -1,0 +1,9 @@
+index,B_bits,n_trials,p_collapse,mean_dR@10,p99_dR@10,max_dR@10,n_crash,n_nan_inf,n_silent_wrong,n_clean,region_hits,baseline_mode,aligned_worstcase,seed
+HNSW_SQ8,1,50,0.0,0.0,0.0,0.0,0,0,0,50,"{""sq_scale"": 50}",aligned,True,1234
+HNSW_SQ8,8,50,0.0,0.0,0.0,0.0,0,0,0,50,"{""sq_scale"": 50}",aligned,True,1234
+HNSW_SQ8,64,50,1.0,0.9513600000000001,0.95136,0.95136,0,0,50,0,"{""sq_scale"": 50}",aligned,True,1234
+HNSW_SQ8,512,50,1.0,0.9513600000000001,0.95136,0.95136,0,0,50,0,"{""sq_scale"": 50}",aligned,True,1234
+HNSW_SQ8,1024,50,1.0,0.9513600000000001,0.95136,0.95136,0,0,50,0,"{""sq_scale"": 50}",aligned,True,1234
+HNSW_SQ8,8192,50,1.0,0.9513600000000001,0.95136,0.95136,0,0,50,0,"{""sq_scale"": 50}",aligned,True,1234
+HNSW_SQ8,65536,50,1.0,,,,50,0,0,0,"{""sq_scale"": 50}",aligned,True,1234
+HNSW_SQ8,262144,50,1.0,,,,50,0,0,0,"{""sq_scale"": 50}",aligned,True,1234

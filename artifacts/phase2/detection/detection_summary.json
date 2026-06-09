@@ -1,0 +1,51 @@
+{
+  "catastrophic": {
+    "n": 4389,
+    "detected": 2348,
+    "coverage_pct": 53.49737981316929
+  },
+  "moderate": {
+    "n": 4516,
+    "detected": 2257,
+    "coverage_pct": 49.97785651018601
+  },
+  "false_positive": {
+    "clean_flagged": 0,
+    "clean_n": 5,
+    "benign_flagged": 1161,
+    "benign_n": 23479,
+    "benign_fp_pct": 4.9448443289748285
+  },
+  "overhead": {
+    "IVF_FLAT": {
+      "guard_seconds": 2.7095898985862732e-05,
+      "query_seconds": 0.3767248149961233,
+      "guard_vs_query": 7.192491151967667e-05
+    },
+    "IVF_SQ8": {
+      "guard_seconds": 4.056468605995178e-05,
+      "query_seconds": 0.0801564110442996,
+      "guard_vs_query": 0.0005060691407145602
+    },
+    "IVF_PQ_M8": {
+      "guard_seconds": 4.607806913554668e-05,
+      "query_seconds": 0.057603596709668636,
+      "guard_vs_query": 0.000799916528958904
+    },
+    "IVF_PQ_M16": {
+      "guard_seconds": 4.485226236283779e-05,
+      "query_seconds": 0.09399421513080597,
+      "guard_vs_query": 0.00047718109354304047
+    },
+    "HNSW_SQ8": {
+      "guard_seconds": 7.470045238733291e-06,
+      "query_seconds": 0.011912036687135696,
+      "guard_vs_query": 0.0006271005903466117
+    }
+  },
+  "pad": 0.0,
+  "raw_dirs": [
+    "/home/u01/tmouse/quant_protection/artifacts/phase1/raw",
+    "/home/u01/tmouse/quant_protection/artifacts/phase2/raw"
+  ]
+}

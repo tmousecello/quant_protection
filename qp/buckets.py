@@ -22,6 +22,7 @@ BUCKET_OF_KIND = {
     "sq_scale": "recall_relevant",      # SQ vmin/vdiff per dim
     "pq_codebook": "recall_relevant",   # PQ sub-quantizer codebook (accounting only this round)
     "header": "crash_structure",        # fourcc magic + index params
+    "codes_meta": "crash_structure",    # IVF invlist header + per-list size array (flip -> load crash)
     "graph_meta": "crash_structure",    # HNSW levels/offsets/entry_point
     "graph_edges": "crash_structure",   # HNSW neighbor adjacency (int32 ids -> OOB crash)
 }
@@ -44,6 +45,15 @@ BENIGN_ABS = 1e-4         # a flip is benign if |dRecall@10| <= this
 
 # fp32 within-element bit-position tags, ordered MSB-effect -> LSB-effect for plotting.
 FP32_TAGS = ["sign", "exponent", "mantissa-high", "mantissa-low"]
+# (byte-within-float, bit) pairs that resolve to each fp32 tag (kept consistent with
+# bit_position_tag below). Sampling stratifies by these tags so the 1-in-32 sign bit gets
+# the same coverage as mantissa — byte-lane stratification alone leaves sign at 1/32.
+FP32_TAG_BITS = {
+    "sign":          [(3, 7)],
+    "exponent":      [(3, b) for b in range(7)] + [(2, 7)],
+    "mantissa-high": [(2, b) for b in range(7)] + [(1, b) for b in range(8)],
+    "mantissa-low":  [(0, b) for b in range(8)],
+}
 # SQ8 within-byte tags, ordered MSB -> LSB.
 SQ8_TAGS = [f"sq8_b{b}" for b in (7, 6, 5, 4, 3, 2, 1, 0)]
 
@@ -71,10 +81,12 @@ def element_dtype_of(index_name, region):
 
     IVF_FLAT `codes` is stored as raw fp32 vectors yet labeled uint8 in regions.json, so it
     must be tagged as float32 (4-byte stride) for the fp32-vs-int8 contrast to be honest.
-    NOTE (documented approximation): IVF code blocks interleave int64 list ids between the
-    fp32 vectors, so the 4-byte stride is only approximately aligned across the whole region.
-    All other `codes` are genuine SQ8 (uint8). centroid / sq_scale / pq_codebook / vectors
-    are fp32.
+    regions.py now anchors the `codes` region at the first real inverted-list code, so the
+    4-byte fp32 grid is correctly phase-aligned (byte 3 = sign/exponent). NOTE (documented
+    approximation): IVF lists interleave int64 ids after each list's codes; those id bytes
+    (~1.5% of the region, 8-byte aligned so the fp32 phase is preserved) are still tagged as
+    if fp32 — a small, benign contamination of the bit-position profile. All other `codes`
+    are genuine SQ8 (uint8). centroid / sq_scale / pq_codebook / vectors are fp32.
     """
     kind = region["kind"]
     if kind in ("centroid", "sq_scale", "pq_codebook", "vectors"):

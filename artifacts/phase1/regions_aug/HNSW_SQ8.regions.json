@@ -35,7 +35,7 @@
       "byte_start": 272130558,
       "byte_len": 128000008,
       "dtype": "uint8",
-      "semantic": "SQ8 storage codes (estimated: tail after sq_scale; added in Phase 1 to enable the IVF_SQ8 vs HNSW_SQ8 codes comparison)",
+      "semantic": "quantized storage codes (estimated: tail after the last mapped region; added in Phase 1 to enable the fp32-vs-SQ8 codes comparison)",
       "located": false
     }
   ]

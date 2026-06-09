@@ -32,6 +32,26 @@ def flip_bits(buf, positions):
         buf[byte_pos] ^= np.uint8(1 << bit)
 
 
+def burst_positions(start_bit, B):
+    """The (byte_pos, bit) pairs for B consecutive bits starting at absolute bit `start_bit`.
+
+    Bit addressing matches flip_bit: absolute bit p -> byte p // 8, bit p % 8. Returned as a
+    plain list so the isolated workers (qp.isolation) can pickle the positions and apply them
+    with flip_bits without re-deriving the arithmetic.
+    """
+    return [(p // 8, p % 8) for p in range(int(start_bit), int(start_bit) + int(B))]
+
+
+def burst_flip(buf, start_bit, B):
+    """In-place: flip B consecutive bits beginning at absolute bit index `start_bit`.
+
+    Models a spatially-clustered fault (a bad DRAM block / contiguous storage corruption),
+    the burst sub-study's injector. Self-inverse like flip_bit — calling it again with the
+    same (start_bit, B) restores the buffer exactly. The single-bit interface is untouched.
+    """
+    flip_bits(buf, burst_positions(start_bit, B))
+
+
 def rebuild(buf):
     """Deserialize a (possibly corrupted) buffer.
 

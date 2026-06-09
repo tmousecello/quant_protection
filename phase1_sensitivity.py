@@ -78,9 +78,11 @@ def _sample(byte_start, off, bit, edtype):
 def plan_region_samples(name, region, s_large, s_centroid, sq_cap, rng):
     """Return the list of bit samples for one recall_relevant region.
 
-    Stratified so each fp32 byte (sign/exp vs mantissa) and each SQ8 bit index is evenly
-    covered, instead of uniform sampling that would starve the rare-but-catastrophic sign
-    bit (1/32 of fp32 bits).
+    Stratified by the 4 fp32 semantic tags (sign / exponent / mantissa-high / mantissa-low)
+    — equal samples each — so the rare-but-catastrophic sign bit (just 1 of 32 fp32 bits)
+    gets the same coverage as mantissa. Plain uniform sampling, OR byte-lane stratification
+    that then draws the bit uniformly, both leave sign at 1/32; tag stratification does not.
+    SQ8 regions stratify across the 8 bit indices.
     """
     rclass = buckets.region_class_of(region)
     edtype = buckets.element_dtype_of(name, region)
@@ -90,9 +92,10 @@ def plan_region_samples(name, region, s_large, s_centroid, sq_cap, rng):
     if rclass == "small_critical":
         total_bits = byte_len * 8
         if sq_cap is not None and total_bits > sq_cap:
-            # smoke: evenly spaced subset across the region
-            for gi in np.linspace(0, total_bits - 1, sq_cap).astype(int):
-                out.append(_sample(byte_start, int(gi) // 8, int(gi) % 8, edtype))
+            # smoke: spread bytes across the region but cycle the bit index so every bit
+            # position (and thus every fp32/SQ8 tag) appears in the capped subset.
+            for i, byte_off in enumerate(np.linspace(0, byte_len - 1, sq_cap).astype(int)):
+                out.append(_sample(byte_start, int(byte_off), i % 8, edtype))
         else:
             for off in range(byte_len):
                 for bit in range(8):
@@ -103,12 +106,14 @@ def plan_region_samples(name, region, s_large, s_centroid, sq_cap, rng):
     if edtype == "float32":
         n_elems = max(1, byte_len // 4)
         per = max(1, S // 4)
-        for w in range(4):                       # stratify across the 4 little-endian bytes
+        for tag in buckets.FP32_TAGS:            # equal samples per semantic tag, so the
+            choices = buckets.FP32_TAG_BITS[tag]  # 1/32 sign bit is covered like mantissa
             for _ in range(per):
-                off = int(rng.integers(n_elems)) * 4 + w
+                wbyte, bit = choices[int(rng.integers(len(choices)))]
+                off = int(rng.integers(n_elems)) * 4 + wbyte
                 if off >= byte_len:
                     continue
-                out.append(_sample(byte_start, off, int(rng.integers(8)), edtype))
+                out.append(_sample(byte_start, off, bit, edtype))
     else:                                        # uint8: stratify across the 8 bit indices
         per = max(1, S // 8)
         for bit in range(8):
@@ -267,6 +272,13 @@ def aggregate(all_records):
         dtol = np.array([r["dTol"] for r in recs if r["dTol"] is not None], dtype=float)
         fm = [r["failure_mode"] for r in recs]
         n = d10.size
+        n_total = len(recs)                       # includes crash records (dRecall=None)
+        n_crash = fm.count(metrics.CRASH)
+        # crash = total loss -> counts as catastrophic, never benign. pct denominators use
+        # n_total (all flips) so they stay consistent with n_samples; mean/p99/max are over
+        # the surviving (non-crash) flips since a crash has no dRecall to average.
+        n_cat = int((d10 > buckets.CATASTROPHIC_ABS).sum()) + n_crash
+        n_ben = int((np.abs(d10) <= buckets.BENIGN_ABS).sum())
         if n > 1:
             sem = float(stats.sem(d10))
             h = sem * float(stats.t.ppf(0.975, n - 1))
@@ -284,9 +296,8 @@ def aggregate(all_records):
             "mean_dRecall@1": float(d1.mean()) if d1.size else None,
             "mean_dRecall@100": float(d100.mean()) if d100.size else None,
             "mean_dTol": float(dtol.mean()) if dtol.size else None,
-            "pct_benign": float((np.abs(d10) <= buckets.BENIGN_ABS).mean() * 100) if n else None,
-            "pct_catastrophic":
-                float((d10 > buckets.CATASTROPHIC_ABS).mean() * 100) if n else None,
+            "pct_benign": float(100.0 * n_ben / n_total) if n_total else None,
+            "pct_catastrophic": float(100.0 * n_cat / n_total) if n_total else None,
             "ci95_low": (mean10 - h) if n else None,
             "ci95_high": (mean10 + h) if n else None,
             "n_clean": fm.count(metrics.CLEAN),
@@ -503,10 +514,23 @@ def main():
             rr = recall_relevant_regions(rmap)
             check_plan_reproducible(name, rr, args.seed)
         log("        D3 sample plans reproducible: OK")
-        # D4 confinement: every sampled byte_pos lay in a recall_relevant region
-        for r in all_records:
-            assert r["bucket"] == "recall_relevant"
-        log("        D4 injection confined to recall_relevant regions: OK")
+        # D4 confinement: re-derive each sampled byte_pos's region from the region map and
+        # confirm the byte actually falls inside the named recall_relevant region. (The
+        # stored `bucket` field is a literal and proves nothing on its own; this catches a
+        # sample that strayed into a crash_structure/benign byte via an off-by-one.)
+        for name in names:
+            rmap = load_augmented_regions(name, paths["regions_dir"])
+            span = {r["name"]: (r["byte_start"], r["byte_start"] + r["byte_len"],
+                                buckets.bucket_of(r)) for r in rmap["regions"]}
+            for r in all_records:
+                if r["index"] != name:
+                    continue
+                s, e, b = span[r["region"]]
+                assert b == "recall_relevant", \
+                    f"{name}/{r['region']} bucket={b}, expected recall_relevant"
+                assert s <= r["byte_pos"] < e, \
+                    f"{name} byte_pos {r['byte_pos']} outside {r['region']} [{s},{e})"
+        log("        D4 injection confined to recall_relevant regions (re-derived): OK")
         # forced crash on the first index that has a crash_structure region
         crashed = False
         for name in names:

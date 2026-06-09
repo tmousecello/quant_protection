@@ -27,7 +27,18 @@ artifacts/phase1/raw/
 # png figures
 artifacts/phase1/charts/
 
+# --- phase2 heavy / binary outputs (rebuilt on the workstation) ---
+# per-flip jsonl shards + the dumped index buffers / query-gt .npy the isolated workers mmap
+artifacts/phase2/raw/
+artifacts/phase2/_substrate/
+artifacts/phase2/**/*.npy
+artifacts/phase2/**/*.jsonl
+artifacts/phase2/**/*.done
+
 # Everything else under artifacts/ IS tracked on purpose (small text results):
+#   artifacts/phase2/*.md (README/prompt), vuln_map_pq.csv, graph_edges_characterization.csv,
+#   rollup/curve*.csv + region_terms.csv, detection/{coverage.csv,*_summary.json,expected_ranges.json},
+#   burst/*_burst.csv
 #   artifacts/baseline.{json,csv}
 #   artifacts/regions/*.regions.json
 #   artifacts/region_accounting.{json,csv,md}

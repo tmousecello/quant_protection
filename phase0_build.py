@@ -47,17 +47,50 @@ def ensure_dirs(out):
         os.makedirs(os.path.join(out, sub), exist_ok=True)
 
 
+def regenerate_regions(out, max_rows):
+    """Rebuild byte-region maps from the saved indexes only (no rebuild/tune).
+
+    build_region_map needs the base vectors (to content-locate fp32 storage) and the live
+    index (to read centroids / SQ scales / invlist codes), so we load xb and read each
+    saved index. Everything else in artifacts/ is left untouched.
+    """
+    spec_by = {s["name"]: s for s in config.INDEX_SPECS}
+    log(f"[phase0 --regions-only] out={out}  max_rows={max_rows}")
+    xb = data.load_base(max_rows)
+    for spec in config.INDEX_SPECS:
+        name = spec["name"]
+        path = os.path.join(out, "indexes", f"{name}.faissindex")
+        if not os.path.exists(path):
+            log(f"        [skip] {name}: no saved index at {path}")
+            continue
+        index = faiss.read_index(path)
+        rmap = regions.build_region_map(name, spec_by[name], index, xb)
+        with open(os.path.join(out, "regions", f"{name}.regions.json"), "w") as f:
+            json.dump(rmap, f, indent=2)
+        n_located = sum(1 for r in rmap["regions"] if r["located"])
+        log(f"        {name:<12} regions={len(rmap['regions'])} ({n_located} located)  "
+            f"kinds={[r['kind'] for r in rmap['regions']]}")
+    log("\nPHASE0 REGIONS OK")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-rows", type=int, default=None,
                     help="load only first N base vectors (smoke runs)")
     ap.add_argument("--out", default=os.path.join(config.ROOT, "artifacts"))
     ap.add_argument("--target", type=float, default=config.OPERATING_POINT)
+    ap.add_argument("--regions-only", action="store_true",
+                    help="rebuild only the byte-region maps from the already-saved indexes "
+                         "(no build/tune/baseline); use after changing qp/regions.py")
     args = ap.parse_args()
 
     out = os.path.abspath(args.out)
     ensure_dirs(out)
     smoke = args.max_rows is not None
+
+    if args.regions_only:
+        return regenerate_regions(out, args.max_rows)
 
     log(f"[phase0] out={out}  max_rows={args.max_rows}  target={args.target}")
     log("[phase0] loading SIFT1M ...")

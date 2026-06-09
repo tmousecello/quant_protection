@@ -43,20 +43,21 @@
       "total_MB": 520.532619,
       "buckets": {
         "recall_relevant": {
-          "bytes": 520532521,
-          "MB": 520.532521,
-          "pct": 99.9999811731299,
+          "bytes": 520524288,
+          "MB": 520.524288,
+          "pct": 99.9983995239307,
           "regions": [
             "centroid",
             "codes"
           ]
         },
         "crash_structure": {
-          "bytes": 98,
-          "MB": 9.8e-05,
-          "pct": 1.8826870098605676e-05,
+          "bytes": 8331,
+          "MB": 0.008331,
+          "pct": 0.0016004760693008558,
           "regions": [
-            "header"
+            "header",
+            "codes_meta"
           ]
         },
         "benign": {
@@ -81,9 +82,9 @@
       "total_MB": 136.533688,
       "buckets": {
         "recall_relevant": {
-          "bytes": 136533545,
-          "MB": 136.533545,
-          "pct": 99.99989526394394,
+          "bytes": 136525312,
+          "MB": 136.525312,
+          "pct": 99.99386525031098,
           "regions": [
             "centroid",
             "sq_scale",
@@ -91,11 +92,12 @@
           ]
         },
         "crash_structure": {
-          "bytes": 98,
-          "MB": 9.8e-05,
-          "pct": 7.177715729761874e-05,
+          "bytes": 8331,
+          "MB": 0.008331,
+          "pct": 0.006101790790270017,
           "regions": [
-            "header"
+            "header",
+            "codes_meta"
           ]
         },
         "benign": {
@@ -128,9 +130,9 @@
       "total_MB": 16.663732,
       "buckets": {
         "recall_relevant": {
-          "bytes": 16663584,
-          "MB": 16.663584,
-          "pct": 99.99911184361342,
+          "bytes": 16655360,
+          "MB": 16.65536,
+          "pct": 99.94975915359177,
           "regions": [
             "centroid",
             "pq_codebook",
@@ -138,11 +140,12 @@
           ]
         },
         "crash_structure": {
-          "bytes": 98,
-          "MB": 9.8e-05,
-          "pct": 0.0005881035532736605,
+          "bytes": 8322,
+          "MB": 0.008322,
+          "pct": 0.049940793574932675,
           "regions": [
-            "header"
+            "header",
+            "codes_meta"
           ]
         },
         "benign": {
@@ -169,9 +172,9 @@
       "total_MB": 24.663732,
       "buckets": {
         "recall_relevant": {
-          "bytes": 24663584,
-          "MB": 24.663584,
-          "pct": 99.99939992860772,
+          "bytes": 24655360,
+          "MB": 24.65536,
+          "pct": 99.96605542097197,
           "regions": [
             "centroid",
             "pq_codebook",
@@ -179,11 +182,12 @@
           ]
         },
         "crash_structure": {
-          "bytes": 98,
-          "MB": 9.8e-05,
-          "pct": 0.0003973445705621517,
+          "bytes": 8322,
+          "MB": 0.008322,
+          "pct": 0.03374185220630844,
           "regions": [
-            "header"
+            "header",
+            "codes_meta"
           ]
         },
         "benign": {
@@ -280,8 +284,8 @@
     }
   ],
   "prediction_gap": {
-    "IVF_SQ8_recall_relevant_pct": 99.99989526394394,
+    "IVF_SQ8_recall_relevant_pct": 99.99386525031098,
     "HNSW_SQ8_recall_relevant_pct": 31.989816044195933,
-    "delta": 68.01007921974801
+    "delta": 68.00404920611504
   }
 }

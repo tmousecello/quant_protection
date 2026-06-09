@@ -51,16 +51,22 @@ def c1_table(df, out):
     for (index, region, kind), sub in g:
         d10 = sub["dRecall@10"].dropna().to_numpy(dtype=float)
         n = d10.size
+        n_total = len(sub)                        # includes crash rows (dRecall is NaN)
+        n_crash = int((sub["failure_mode"] == metrics.CRASH).sum())
+        # crash = total loss -> catastrophic, never benign; pct denominators use n_total so
+        # they match `n`. mean/p99/max are over surviving (non-crash) flips.
+        n_cat = int((d10 > buckets.CATASTROPHIC_ABS).sum()) + n_crash
+        n_ben = int((np.abs(d10) <= buckets.BENIGN_ABS).sum())
         rows.append({
             "index": index, "region": region, "kind": kind,
             "element_dtype": sub["element_dtype"].iloc[0],
-            "n": len(sub),
+            "n": n_total,
             "mean_dRecall@10": d10.mean() if n else np.nan,
             "p99_dRecall@10": np.percentile(d10, 99) if n else np.nan,
             "max_dRecall@10": d10.max() if n else np.nan,
-            "pct_catastrophic": (d10 > buckets.CATASTROPHIC_ABS).mean() * 100 if n else np.nan,
-            "pct_benign": (np.abs(d10) <= buckets.BENIGN_ABS).mean() * 100 if n else np.nan,
-            "n_crash": int((sub["failure_mode"] == metrics.CRASH).sum()),
+            "pct_catastrophic": 100.0 * n_cat / n_total if n_total else np.nan,
+            "pct_benign": 100.0 * n_ben / n_total if n_total else np.nan,
+            "n_crash": n_crash,
             "n_nan_inf": int((sub["failure_mode"] == metrics.NAN_INF).sum()),
         })
     tbl = pd.DataFrame(rows)

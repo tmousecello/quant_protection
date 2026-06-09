@@ -30,12 +30,21 @@
       "located": true
     },
     {
+      "name": "codes_meta",
+      "kind": "codes_meta",
+      "byte_start": 655508,
+      "byte_len": 8224,
+      "dtype": "bytes",
+      "semantic": "invlist header + per-list size array (estimated: metadata..first code; flip crashes on load)",
+      "located": false
+    },
+    {
       "name": "codes",
       "kind": "codes",
-      "byte_start": 655508,
-      "byte_len": 24008224,
+      "byte_start": 663732,
+      "byte_len": 24000000,
       "dtype": "uint8",
-      "semantic": "inverted-list codes (estimated: tail after located metadata)",
+      "semantic": "inverted-list codes (estimated: first list code..buffer end)",
       "located": false
     }
   ]

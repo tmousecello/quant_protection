@@ -41,28 +41,35 @@ def load_regions_json(name, regions_dir):
 
 
 def load_augmented_regions(name, regions_dir):
-    """Region map for one index with the HNSW_SQ8 estimated codes tail added if missing.
+    """Region map for one index with a quantized-graph storage codes tail added if missing.
 
     Shared by the accounting step and the sensitivity sweep so both see identical regions.
-    Returns the full {index, total_bytes, regions:[...]} dict. For every index except
-    HNSW_SQ8 this is the Phase 0 map unchanged.
+    Returns the full {index, total_bytes, regions:[...]} dict.
+
+    regions.py maps a quantized graph index (e.g. HNSW_SQ8) as graph_meta/graph_edges +
+    sq_scale only; its ~code_size*ntotal storage codes are the uncovered tail. We add that
+    tail as an estimated `codes` region (same convention regions.py uses for IVF codes) so
+    the fp32-vs-SQ8 codes comparison has something to sample on the graph-SQ side. The check
+    is structural (graph index, no codes region, non-empty tail) rather than a hardcoded
+    name, so a future HNSW_PQ/SQ4 is handled too; fp32 HNSW already covers its tail with a
+    `vectors` region (tail==0), making this a no-op there. Non-graph indexes are unchanged.
     """
     rmap = load_regions_json(name, regions_dir)
-    if name != "HNSW_SQ8":
-        return rmap
     regions = list(rmap["regions"])
     total = int(rmap["total_bytes"])
+    is_graph = any(r["kind"] in ("graph_edges", "graph_meta") for r in regions)
+    has_codes = any(r["kind"] == "codes" for r in regions)
     covered_end = max((r["byte_start"] + r["byte_len"] for r in regions), default=0)
     tail = total - covered_end
-    if tail > 0 and not any(r["kind"] == "codes" for r in regions):
+    if is_graph and not has_codes and tail > 0:
         regions.append({
             "name": "codes",
             "kind": "codes",
             "byte_start": int(covered_end),
             "byte_len": int(tail),
             "dtype": "uint8",
-            "semantic": "SQ8 storage codes (estimated: tail after sq_scale; added in Phase 1 "
-                        "to enable the IVF_SQ8 vs HNSW_SQ8 codes comparison)",
+            "semantic": "quantized storage codes (estimated: tail after the last mapped "
+                        "region; added in Phase 1 to enable the fp32-vs-SQ8 codes comparison)",
             "located": False,
         })
     return {"index": name, "total_bytes": total, "regions": regions}

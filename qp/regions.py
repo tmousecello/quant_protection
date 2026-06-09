@@ -59,6 +59,42 @@ def _locate(bts, content, name, kind, dtype, semantic, out):
     return start + len(cb)
 
 
+def _ivf_first_code_start(bts, index):
+    """Byte offset of the first stored inverted-list code (first vector of the first
+    non-empty list) inside the serialized buffer, or None if not uniquely locatable.
+
+    The IVF code block is serialized as [invlist header + per-list size array] then, per
+    list, [codes][ids]. The leading header (~8KB for nlist=1024) is what crashes on a flip,
+    and it shifts the fp32 code grid off the centroid-end boundary by a non-multiple of 4,
+    so locating the *real* first code lets us (a) anchor the fp32 bit-position grid and
+    (b) split the crash-prone header out of the recall_relevant codes region. Works for any
+    quantizer because it reads the codes straight from the inverted lists.
+    """
+    il = index.invlists
+    l = 0
+    while l < index.nlist and il.list_size(l) == 0:
+        l += 1
+    if l >= index.nlist:
+        return None
+    cs = int(il.code_size)
+    cptr = il.get_codes(l)
+    try:
+        arr = faiss.rev_swig_ptr(cptr, int(il.list_size(l)) * cs).copy()
+    finally:
+        il.release_codes(l, cptr)
+    # Use a LONGER needle than a single code: PQ codes are tiny (M8 = 8 bytes) and recur across
+    # 1M vectors, so a one-code needle is often non-unique and the split silently falls back.
+    # The first list's codes are serialized contiguously (before its ids), so a multi-code
+    # prefix is a valid, far-more-unique anchor.
+    needle = arr[:min(arr.size, 512)].tobytes()
+    start = bts.find(needle)
+    if start < 0:
+        return None
+    if bts.find(needle, start + 1) != -1:        # a second occurrence => ambiguous, bail
+        return None
+    return start
+
+
 def build_region_map(name, spec, index, xb):
     """Build the region list for one index. xb = base vectors added to the index."""
     buf = to_buffer(index)
@@ -84,11 +120,25 @@ def build_region_map(name, spec, index, xb):
             e = _locate(bts, pqc, "pq_codebook", "pq_codebook", "float32",
                         "PQ sub-quantizer codebook", regions)
             front_end = max(front_end, e or 0)
-        # IVF codes are reordered per list -> documented tail estimate.
+        # IVF codes are reordered per list -> documented tail estimate. We anchor the codes
+        # region at the first real list code (so the fp32 grid is phase-aligned) and split
+        # the leading invlist header + per-list size array into a crash_structure region,
+        # because flipping those size/header bytes crashes on load rather than degrading
+        # recall. If the first code can't be located uniquely, fall back to the raw tail.
         if front_end < total:
+            code_start = front_end
+            cstart = _ivf_first_code_start(bts, index)
+            if cstart is not None and front_end <= cstart < total:
+                if cstart > front_end:
+                    regions.append(_region(
+                        "codes_meta", "codes_meta", front_end, cstart - front_end, "bytes",
+                        "invlist header + per-list size array "
+                        "(estimated: metadata..first code; flip crashes on load)",
+                        located=False))
+                code_start = cstart
             regions.append(_region(
-                "codes", "codes", front_end, total - front_end, "uint8",
-                "inverted-list codes (estimated: tail after located metadata)",
+                "codes", "codes", code_start, total - code_start, "uint8",
+                "inverted-list codes (estimated: first list code..buffer end)",
                 located=False))
 
     elif spec["kind"] == "graph":

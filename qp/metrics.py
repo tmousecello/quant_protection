@@ -14,15 +14,22 @@ import numpy as np
 
 
 def recall_at_k(pred_ids, gt_ids, k):
-    """Mean over queries of |pred_topk ∩ true_topk| / k.
+    """Mean over queries of |set(pred_topk) ∩ set(true_topk)| / k.
 
     pred_ids, gt_ids: (N, >=k) int arrays. FAISS pads missing results with -1; those
     never match a (non-negative) ground-truth id, so they are handled correctly.
+
+    Counting is done *per true id* (any-over-pred), not per pred slot, so a corrupted
+    index that returns the SAME correct id in several slots cannot inflate recall — each
+    true neighbour is credited at most once. Without this, result collapse (a real
+    corruption mode, e.g. flipped IVF list ids) would silently raise recall and mask
+    damage. Truth ids are distinct, so |intersection| is exactly the hit count.
     """
     pred = np.asarray(pred_ids)[:, :k]
     truth = np.asarray(gt_ids)[:, :k]
-    # (N, k_pred, k_true) match tensor -> any-over-truth -> count hits per query.
-    hits = (pred[:, :, None] == truth[:, None, :]).any(axis=2).sum(axis=1)
+    # (N, k_pred, k_true) match tensor -> for each true id, did ANY pred slot hit it ->
+    # count distinct true ids found per query.
+    hits = (pred[:, :, None] == truth[:, None, :]).any(axis=1).sum(axis=1)
     return float(hits.mean() / k)
 
 
@@ -47,7 +54,9 @@ def tolerant_recall(pred_ids, gt_ids, gt_dist, k, eps):
     hits = 0
     for q in range(n):
         ok_ids = truth[q][acceptable[q]]
-        hits += np.isin(pred[q], ok_ids).sum()
+        # np.unique(pred[q]) dedups so repeated correct ids count once; this both keeps
+        # per-query tolerant recall <= 1.0 and prevents result-collapse from inflating it.
+        hits += np.isin(np.unique(pred[q]), ok_ids).sum()
     return float(hits / (n * k))
 
 

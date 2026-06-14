@@ -218,19 +218,33 @@ python phase2_burst.py --aligned-worstcase --trials 50           # land on the c
 
 ---
 
-## What "collapse" / "catastrophic" mean (recap)
+## What "harmful" vs "collapse" mean (recap)
 
-| index family | baseline_mode | catastrophic rule |
-|---|---|---|
-| FLAT / IVF_FLAT / HNSW / IVF_SQ8 / HNSW_SQ8 | `aligned` | ΔR@10 > 0.01 (absolute) |
-| IVF_PQ_M8 / IVF_PQ_M16 | `own` | faulted recall@10 < 0.5 × own clean recall@10 |
+Two **distinct** severity tiers — keep them separate (conflating them is what made fp32 read as
+`p_collapse=1.0` under a large burst while Curve B said 0):
 
-Both the relative and absolute counts are stored in every Tier 1 row, so Tier 3 can choose.
+| tier | rule | applies to | used by |
+|---|---|---|---|
+| **harmful** | ΔR@10 > 0.01 (`buckets.HARMFUL_ABS`) | all families | single-bit sensitivity map, Curve A, detection guard |
+| **collapse** | faulted recall@10 < 0.5 × own clean (`config.COLLAPSE_RETENTION_FRAC`), **silent-only** | all families (unified) | headline Curve B + burst |
+
+`collapse ⊆ harmful` (a retention collapse has ΔR > ~0.475 ≫ 0.01). Collapse is **silent-only**:
+a crash / nan-inf is detectable and counted separately (`n_crash` / `n_nan_inf`), not as collapse.
+The single source of truth for the predicate is `qp.metrics.is_silent_collapse`.
+
+`pct_collapse` is now stored in every sensitivity-map row (Phase 1 + Tier 1) and is what Tier 3
+uses for `cat_frac`. For the current on-disk maps (which predate the column) it was filled by
+`phase2_recompute_collapse.py`, which re-sweeps only `sq_scale` (the one region with nonzero
+harmful fraction; every other region is 0 by the `collapse ⊆ harmful` implication).
+
+> History: earlier this was a split — aligned indexes used absolute ΔR>0.01 and only PQ used
+> retention. That split called two different things "collapse"; it is superseded by the single
+> retention rule above. See `phase2_fix_report_zh.md`.
 
 ## Files added by Phase 2
 
 - Scripts: `phase2_pq_sensitivity.py`, `phase2_graph_sensitivity.py`, `phase2_rollup.py`,
-  `phase2_detection.py`, `phase2_burst.py`.
+  `phase2_detection.py`, `phase2_burst.py`, `phase2_recompute_collapse.py` (sq_scale collapse re-sweep).
 - Library (additive): `qp/isolation.py` (subprocess crash isolation), `qp/flip.burst_flip` /
   `qp/flip.burst_positions`, and a `PHASE2_*` block in `qp/config.py`.
 - `artifacts/baseline.*` and the locked `qp/config.py` values are untouched. The byte-region

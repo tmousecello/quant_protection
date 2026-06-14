@@ -12,6 +12,24 @@ sees the clean path; Phase 1/2 import this for corrupted runs.
 """
 import numpy as np
 
+from qp import config
+
+
+def is_silent_collapse(faulted10, clean10, frac=None):
+    """Unified collapse predicate (all index families) — the single source of truth.
+
+    Collapse = the index lost at least `frac` of its usable recall: faulted recall@10 <
+    frac * own clean recall@10 (retention rule; frac defaults to config.COLLAPSE_RETENTION_FRAC).
+    This replaces the old aligned/own split (absolute >0.01 vs retention) that made fp32 read
+    as collapsing under a large burst while Curve B said it never collapses.
+
+    SILENT-only: a crash / nan-inf / missing result (faulted10 is None) is DETECTABLE, not a
+    silent collapse, so it returns False here — callers count those separately (n_crash/n_nan_inf).
+    """
+    if frac is None:
+        frac = config.COLLAPSE_RETENTION_FRAC
+    return faulted10 is not None and faulted10 < frac * clean10
+
 
 def recall_at_k(pred_ids, gt_ids, k):
     """Mean over queries of |set(pred_topk) ∩ set(true_topk)| / k.

@@ -39,8 +39,20 @@ REGION_CLASS_OF_KIND = {
     "pq_codebook": "small_critical",
 }
 
-# Documented decision thresholds (prompt.txt B6: "先取絕對 >0.01").
-CATASTROPHIC_ABS = 0.01   # a flip is catastrophic if dRecall@10 > this
+# Two-tier severity vocabulary (keep these distinct — conflating them caused the fp32
+# Curve-B-vs-burst contradiction; see qp.config.COLLAPSE_RETENTION_FRAC):
+#   HARMFUL  — ANY measurable recall damage: dRecall@10 > HARMFUL_ABS (>0.01). Drives the
+#              single-bit sensitivity map, Curve A (expected ΔR) and the detection guard.
+#   COLLAPSE — the index lost >=half its usable recall: faulted@10 < frac*clean@10 (retention,
+#              config.COLLAPSE_RETENTION_FRAC). The HEADLINE notion (Curve B + burst), and
+#              SILENT-only (crash/nan-inf is detectable, counted separately). See
+#              qp.metrics.is_silent_collapse — the single source of truth for the predicate.
+# Note collapse ⊆ harmful (a retention collapse has dRecall > ~0.475 ≫ 0.01), so any region
+# whose pct_harmful is 0 has pct_collapse 0 by implication (no re-measurement needed).
+# (prompt.txt B6 originally said "先取絕對 >0.01"; that absolute bar is retained here as the
+# HARMFUL threshold, while COLLAPSE is now the unified retention rule.)
+CATASTROPHIC_ABS = 0.01   # the HARMFUL bar: a flip is harmful if dRecall@10 > this
+HARMFUL_ABS = CATASTROPHIC_ABS   # preferred name for the >0.01 bar (CATASTROPHIC_ABS kept for back-compat)
 BENIGN_ABS = 1e-4         # a flip is benign if |dRecall@10| <= this
 
 # fp32 within-element bit-position tags, ordered MSB-effect -> LSB-effect for plotting.

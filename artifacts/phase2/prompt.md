@@ -60,7 +60,10 @@ Phase 0/1 已確立：大宗 codes/vectors 對單位元翻轉**幾乎免疫**；
 - 沿用 `qp/flip.py` 的注入/還原；沿用 `qp/metrics.py` 的失效分類（silent / nan_inf / crash）。
 - 輸出 schema 與 Phase 1 `vuln_map.csv` 一致（可新增向後相容欄位）：至少含 `index, region, bit_position_tag, n, mean_dR@10, p99_dR@10, max_dR@10, pct_benign, pct_catastrophic, n_silent_wrong, n_crash, n_nan_inf, region_bits, baseline_mode`。新增 `baseline_mode` 欄位標記 `own`（PQ）或 `aligned`（其餘）。
 - 種子固定、可重現；所有抽樣參數走 CLI 旗標或新 config 區塊，附合理預設。
-- **catastrophic（collapse）定義**走 config 參數，預設：對齊基線索引用「ΔR@10 > 0.01 絕對」；PQ（低基線）用「recall retention < 50% of own clean」相對定義。兩者都記錄，供 Tier 3 取用。
+- **嚴重度定義（已修訂，見 `phase2_fix_report_zh.md`）**：分兩層且**全索引族一致**。
+  **harmful** = ΔR@10 > 0.01（`buckets.HARMFUL_ABS`），給單位元敏感度 / Curve A / detection；
+  **collapse** = faulted recall@10 < 50% of own clean（`config.COLLAPSE_RETENTION_FRAC`，**僅沉默**，crash 另計），給主圖 Curve B + burst。
+  *原 B6 的「ΔR>0.01 絕對」只保留為 harmful 低標；collapse 統一用保留率，PQ 與對齊索引同規則*（修正了舊版「對齊用絕對、PQ 用相對」導致 fp32 在 Curve B 與 burst 自相矛盾的問題）。`pct_collapse` 與 `pct_catastrophic` 兩欄都記錄。
 - **崩潰隔離（重要）**：graph_edges 與 burst 注入可能讓 FAISS C++ 直接 segfault 整個行程。對這兩類注入，**每次翻轉在獨立 subprocess 內執行**（或等效隔離），使 segfault 被記為 `crash` 而不會殺掉整個掃描。Tier 1（codes/codebook/centroid）依 Phase 0 dry-run 為乾淨反序列化，可不需隔離。
 
 ---

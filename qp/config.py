@@ -65,10 +65,18 @@ INDEX_SPECS = [
 # README converts these to/from DRAM FIT/Mbit (e.g. Schroeder et al. field study).
 PHASE2_RATE_GRID = [1e-9, 1e-8, 1e-7, 1e-6, 1e-5]
 
-# PQ has a low own-baseline (M8≈0.379, M16≈0.563) so its "catastrophic" is RELATIVE:
-# a flip is catastrophic if faulted recall@10 retains < this fraction of the index's own
-# clean recall@10. Aligned indexes keep the absolute buckets.CATASTROPHIC_ABS (>0.01).
-PHASE2_PQ_RETENTION_FRAC = 0.5
+# UNIFIED collapse threshold (all index families). A flip/burst "collapses" an index if its
+# faulted recall@10 retains < this fraction of the index's OWN clean recall@10 — i.e. it lost
+# at least half its usable recall. This single retention rule replaces the earlier split where
+# aligned indexes used an absolute buckets.CATASTROPHIC_ABS (>0.01) and only PQ used retention;
+# that split called two different things "collapse" and made fp32 (mild ΔR≈0.02 under a large
+# burst) read as p_collapse=1.0 in burst while Curve B said 0 — a contradiction. Retention<50%
+# cleanly separates: fp32 mild damage stays NON-collapse in both figures; SQ8 sq_scale (ΔR≈0.95)
+# collapses in both. NB: buckets.CATASTROPHIC_ABS / HARMFUL_ABS (>0.01) is a DISTINCT, weaker
+# "harmful" notion kept for Curve A / single-bit sensitivity / the detection guard — NOT collapse.
+# Collapse is SILENT-only: crash / nan-inf is detectable and counted separately (see metrics).
+COLLAPSE_RETENTION_FRAC = 0.5
+PHASE2_PQ_RETENTION_FRAC = COLLAPSE_RETENTION_FRAC   # back-compat alias (deprecated name)
 
 # Burst length grid in BITS, spanning sq_scale (8192 bits) up to pq_codebook (~1.05M bits)
 # and beyond — to expose how spatially-clustered errors (a bad DIMM block) magnify with the

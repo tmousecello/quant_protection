@@ -279,6 +279,14 @@ def aggregate(all_records):
         # the surviving (non-crash) flips since a crash has no dRecall to average.
         n_cat = int((d10 > buckets.CATASTROPHIC_ABS).sum()) + n_crash
         n_ben = int((np.abs(d10) <= buckets.BENIGN_ABS).sum())
+        # COLLAPSE (silent-only retention, the headline notion): faulted@10 < frac*clean@10.
+        # Distinct from the >0.01 HARMFUL bar above; a crash is detectable so it is NOT a silent
+        # collapse (excluded here, unlike n_cat). clean is constant within a group. See
+        # qp.metrics.is_silent_collapse / qp.config.COLLAPSE_RETENTION_FRAC.
+        clean10 = recs[0].get("clean_recall@10")
+        n_collapse = sum(1 for r in recs
+                         if metrics.is_silent_collapse(r["faulted_recall@10"], clean10)) \
+            if clean10 is not None else 0
         if n > 1:
             sem = float(stats.sem(d10))
             h = sem * float(stats.t.ppf(0.975, n - 1))
@@ -298,6 +306,7 @@ def aggregate(all_records):
             "mean_dTol": float(dtol.mean()) if dtol.size else None,
             "pct_benign": float(100.0 * n_ben / n_total) if n_total else None,
             "pct_catastrophic": float(100.0 * n_cat / n_total) if n_total else None,
+            "pct_collapse": float(100.0 * n_collapse / n_total) if n_total else None,
             "ci95_low": (mean10 - h) if n else None,
             "ci95_high": (mean10 + h) if n else None,
             "n_clean": fm.count(metrics.CLEAN),

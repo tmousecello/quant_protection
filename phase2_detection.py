@@ -44,7 +44,7 @@ import numpy as np
 
 import faiss
 
-from qp import config, buckets, data
+from qp import config, buckets, data, metrics
 from qp import indexes as ix
 from qp.flip import to_buffer, flip_bit
 from phase1_region_accounting import load_augmented_regions
@@ -109,17 +109,29 @@ def guard(buf, regions, ranges, pad):
 
 
 def severity(rec, harmful):
-    """catastrophic / moderate / benign / crash from a flip record."""
+    """harmful / moderate / benign / crash from a flip record. "harmful" is the >0.01 bar
+    (qp.buckets.HARMFUL_ABS, incl. PQ's relative cat_rel) — the weaker tier. The stricter
+    COLLAPSE subset is tracked separately via record_collapses(); see qp.buckets vocabulary."""
     if rec.get("failure_mode") == "crash":
         return "crash"
     d10 = rec.get("dRecall@10")
     if d10 is None:
         return "crash"
     if rec.get("cat_abs") or rec.get("cat_rel") or d10 > harmful:
-        return "catastrophic"
+        return "harmful"
     if abs(d10) > buckets.BENIGN_ABS:
         return "moderate"
     return "benign"
+
+
+def record_collapses(rec):
+    """Whether a flip record is a (silent) COLLAPSE under the unified retention rule. Uses the
+    record's own faulted/clean recall@10 when present, else PQ's stored cat_rel (already
+    retention, silent). A crash has no faulted recall -> not a silent collapse."""
+    f10, c10 = rec.get("faulted_recall@10"), rec.get("clean_recall@10")
+    if f10 is not None and c10 is not None:
+        return metrics.is_silent_collapse(f10, c10)
+    return bool(rec.get("cat_rel"))
 
 
 def load_raw(raw_dirs):
@@ -213,6 +225,7 @@ def main():
     # --- 3. replay recorded flips through the guard ------------------------------------
     by_index = load_raw(raw_dirs)
     cov = {}            # (index, region, severity) -> [n, n_detected]
+    collapse_cov = [0, 0]   # [n, n_detected] over the stricter COLLAPSE subset
     fp = {"clean": [0, 0], "benign": [0, 0]}   # [n, n_flagged]
     guarded_region_names = {n: {r["name"] for r in region_lists[n]} for n in region_lists}
 
@@ -237,6 +250,8 @@ def main():
             key = (name, r["region"], sev)
             cov.setdefault(key, [0, 0])
             cov[key][0] += 1; cov[key][1] += int(detected)
+            if record_collapses(r):
+                collapse_cov[0] += 1; collapse_cov[1] += int(detected)
             if sev == "benign":
                 fp["benign"][0] += 1; fp["benign"][1] += int(detected)
 
@@ -254,9 +269,11 @@ def main():
         nd = sum(r["n_detected"] for r in rows if r["severity"] == sev)
         return n, nd, (100.0 * nd / n if n else None)
 
-    cat = cov_for("catastrophic"); mod = cov_for("moderate")
+    harm = cov_for("harmful"); mod = cov_for("moderate")
+    coll_pct = (100.0 * collapse_cov[1] / collapse_cov[0]) if collapse_cov[0] else None
     summary = {
-        "catastrophic": {"n": cat[0], "detected": cat[1], "coverage_pct": cat[2]},
+        "harmful": {"n": harm[0], "detected": harm[1], "coverage_pct": harm[2]},
+        "collapse": {"n": collapse_cov[0], "detected": collapse_cov[1], "coverage_pct": coll_pct},
         "moderate": {"n": mod[0], "detected": mod[1], "coverage_pct": mod[2]},
         "false_positive": {
             "clean_flagged": fp["clean"][1], "clean_n": fp["clean"][0],
@@ -269,9 +286,11 @@ def main():
         json.dump(summary, f, indent=2)
 
     log(f"[phase2-T4] wrote detection/{{expected_ranges.json, coverage.csv, detection_summary.json}}")
-    log(f"        catastrophic coverage: {cat[1]}/{cat[0]} "
-        f"({cat[2]:.1f}%)" if cat[0] else "        catastrophic coverage: n/a (no records)")
-    log(f"        moderate coverage:     {mod[1]}/{mod[0]} "
+    log(f"        harmful coverage:    {harm[1]}/{harm[0]} "
+        f"({harm[2]:.1f}%)" if harm[0] else "        harmful coverage: n/a (no records)")
+    log(f"        collapse coverage:   {collapse_cov[1]}/{collapse_cov[0]} "
+        f"({coll_pct:.1f}%)" if collapse_cov[0] else "        collapse coverage: n/a")
+    log(f"        moderate coverage:   {mod[1]}/{mod[0]} "
         f"({mod[2]:.1f}%)" if mod[0] else "        moderate coverage: n/a")
     log(f"        benign false-positive: {fp['benign'][1]}/{fp['benign'][0]}")
 

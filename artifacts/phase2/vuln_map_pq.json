@@ -26,7 +26,8 @@
       "n_crash": 0,
       "n_clean": 114,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -54,7 +55,8 @@
       "n_crash": 0,
       "n_clean": 466,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -82,7 +84,8 @@
       "n_crash": 0,
       "n_clean": 500,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -110,7 +113,8 @@
       "n_crash": 0,
       "n_clean": 213,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -138,7 +142,8 @@
       "n_crash": 0,
       "n_clean": 118,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -166,7 +171,8 @@
       "n_crash": 0,
       "n_clean": 120,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -194,7 +200,8 @@
       "n_crash": 0,
       "n_clean": 122,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -222,7 +229,8 @@
       "n_crash": 0,
       "n_clean": 119,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -250,7 +258,8 @@
       "n_crash": 0,
       "n_clean": 122,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -278,7 +287,8 @@
       "n_crash": 0,
       "n_clean": 120,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -306,7 +316,8 @@
       "n_crash": 0,
       "n_clean": 119,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -334,7 +345,8 @@
       "n_crash": 0,
       "n_clean": 123,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -362,7 +374,8 @@
       "n_crash": 0,
       "n_clean": 255,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -390,7 +403,8 @@
       "n_crash": 0,
       "n_clean": 934,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -418,7 +432,8 @@
       "n_crash": 0,
       "n_clean": 1000,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M16",
@@ -446,7 +461,8 @@
       "n_crash": 0,
       "n_clean": 396,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -474,7 +490,8 @@
       "n_crash": 0,
       "n_clean": 144,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -502,7 +519,8 @@
       "n_crash": 0,
       "n_clean": 476,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -530,7 +548,8 @@
       "n_crash": 0,
       "n_clean": 500,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -558,7 +577,8 @@
       "n_crash": 0,
       "n_clean": 237,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -586,7 +606,8 @@
       "n_crash": 0,
       "n_clean": 122,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -614,7 +635,8 @@
       "n_crash": 0,
       "n_clean": 122,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -642,7 +664,8 @@
       "n_crash": 0,
       "n_clean": 122,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -670,7 +693,8 @@
       "n_crash": 0,
       "n_clean": 123,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -698,7 +722,8 @@
       "n_crash": 0,
       "n_clean": 119,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -726,7 +751,8 @@
       "n_crash": 0,
       "n_clean": 122,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -754,7 +780,8 @@
       "n_crash": 0,
       "n_clean": 120,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -782,7 +809,8 @@
       "n_crash": 0,
       "n_clean": 119,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -810,7 +838,8 @@
       "n_crash": 0,
       "n_clean": 293,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -838,7 +867,8 @@
       "n_crash": 0,
       "n_clean": 942,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -866,7 +896,8 @@
       "n_crash": 0,
       "n_clean": 1000,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     },
     {
       "index": "IVF_PQ_M8",
@@ -894,7 +925,8 @@
       "n_crash": 0,
       "n_clean": 489,
       "baseline_mode": "own",
-      "seed": 1234
+      "seed": 1234,
+      "pct_collapse": 0.0
     }
   ]
 }

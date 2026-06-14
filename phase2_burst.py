@@ -72,9 +72,12 @@ def region_index(regions):
 
 
 def is_silent_collapse(rec, clean10, frac):
-    """Unified, silent-only collapse for a burst trial. Crash / nan-inf (no faulted recall)
-    are detectable and counted separately, so they are NOT silent collapse."""
-    return metrics.is_silent_collapse(rec.get("faulted_recall@10"), clean10, frac)
+    """Unified, silent-only collapse for a burst trial. Crash / nan-inf are detectable and
+    counted separately (n_crash / n_nan_inf), so they are NOT silent collapse. failure_mode is
+    forwarded because a nan-inf trial still carries a numeric faulted_recall@10 (recall is
+    computed from the ids even when distances are non-finite) and would otherwise be miscounted."""
+    return metrics.is_silent_collapse(rec.get("faulted_recall@10"), clean10, frac,
+                                      failure_mode=rec.get("failure_mode"))
 
 
 def sweep_index(name, spec, knob_val, paths, sub, args):

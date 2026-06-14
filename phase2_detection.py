@@ -126,11 +126,12 @@ def severity(rec, harmful):
 
 def record_collapses(rec):
     """Whether a flip record is a (silent) COLLAPSE under the unified retention rule. Uses the
-    record's own faulted/clean recall@10 when present, else PQ's stored cat_rel (already
-    retention, silent). A crash has no faulted recall -> not a silent collapse."""
+    record's own faulted/clean recall@10 when present (passing failure_mode so a detectable
+    nan-inf — which keeps a numeric faulted@10 — is excluded), else PQ's stored cat_rel. A crash
+    / nan-inf is detectable -> not a silent collapse."""
     f10, c10 = rec.get("faulted_recall@10"), rec.get("clean_recall@10")
     if f10 is not None and c10 is not None:
-        return metrics.is_silent_collapse(f10, c10)
+        return metrics.is_silent_collapse(f10, c10, failure_mode=rec.get("failure_mode"))
     return bool(rec.get("cat_rel"))
 
 

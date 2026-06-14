@@ -280,12 +280,14 @@ def aggregate(all_records):
         n_cat = int((d10 > buckets.CATASTROPHIC_ABS).sum()) + n_crash
         n_ben = int((np.abs(d10) <= buckets.BENIGN_ABS).sum())
         # COLLAPSE (silent-only retention, the headline notion): faulted@10 < frac*clean@10.
-        # Distinct from the >0.01 HARMFUL bar above; a crash is detectable so it is NOT a silent
-        # collapse (excluded here, unlike n_cat). clean is constant within a group. See
-        # qp.metrics.is_silent_collapse / qp.config.COLLAPSE_RETENTION_FRAC.
+        # Distinct from the >0.01 HARMFUL bar above; a crash OR nan-inf is detectable so it is
+        # NOT a silent collapse (excluded here, unlike n_cat) — failure_mode is passed so nan-inf
+        # (which keeps a numeric faulted@10) is excluded too. clean is constant within a group.
+        # See qp.metrics.is_silent_collapse / qp.config.COLLAPSE_RETENTION_FRAC.
         clean10 = recs[0].get("clean_recall@10")
         n_collapse = sum(1 for r in recs
-                         if metrics.is_silent_collapse(r["faulted_recall@10"], clean10)) \
+                         if metrics.is_silent_collapse(r["faulted_recall@10"], clean10,
+                                                       failure_mode=r["failure_mode"])) \
             if clean10 is not None else 0
         if n > 1:
             sem = float(stats.sem(d10))

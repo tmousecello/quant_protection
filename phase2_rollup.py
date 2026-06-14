@@ -126,9 +126,11 @@ def regions_from_tag_map(rows, rbits):
             wt = w.get(rc["bit_position_tag"], 0.0)
             e_dr += wt * (_f(rc, "mean_dRecall@10", "mean_dR@10") or 0.0)
             # cat_frac is the COLLAPSE fraction (unified retention rule, qp.metrics.
-            # is_silent_collapse), supplied as pct_collapse by phase2_recompute_collapse /
-            # the aggregators. Fall back to pct_catastrophic (the weaker >0.01 HARMFUL bar)
-            # only for old/smoke maps that predate the column.
+            # is_silent_collapse), supplied as pct_collapse by the NATIVE aggregators
+            # (phase1_sensitivity.aggregate / phase2_pq_sensitivity.aggregate_pq) — the single
+            # source. Regenerate maps via `phase1_sensitivity.py --aggregate-only` (and the Tier 1
+            # PQ run) rather than any side-channel recompute. Fall back to pct_catastrophic (the
+            # weaker >0.01 HARMFUL bar) only for old/smoke maps that predate the pct_collapse column.
             cat += wt * ((_f(rc, "pct_collapse", "pct_catastrophic") or 0.0) / 100.0)
         rb = rbits.get((index, region))
         if rb is None:

@@ -42,11 +42,19 @@ locates it at the file tail.
   to produce the binaries and the b=7 index. The live clean baseline (≈0.983) and any live
   corruption run are blocked until then. (Samuel's own results were produced on x86 Linux.)
 
-- **Parity id-dump.** `hnsw_rabitq_querying` / `exp_faultinject` print recall scalars only;
-  neither emits per-query ids. The qp-vs-C++ id-level parity (`adapter.query_ids`,
-  `tests/test_parity.py::test_rabitq_parity_clean_index`) needs a small instrumentation
-  addition (an ids-dump flag writing top-k ivecs). Flagged, not implemented. The metric-level
-  parity (qp.metrics vs an independent reference) passes now.
+- **Parity id-dump — RESOLVED (implemented; runs on the x86-64 build).** Added
+  `rabitq_instrumentation/exp_dumpids.cpp` (mirrors `hnsw_rabitq_querying.cpp`; for one `ef`
+  writes top-k ids as ivecs and prints `RECALL\t<r>`). `build_rabitq.sh` builds it,
+  `adapter.query_ids` runs it and returns `(ids, cpp_recall)`, and
+  `tests/test_parity.py::test_rabitq_parity_clean_index` now asserts
+  `qp.metrics.recall_at_k(ids, gt, k) == cpp_recall ≈ 0.983` on identical ids (no skip on x86;
+  still skips on arm64 where no binaries exist). The metric-level parity passes everywhere.
+
+## Workstation handoff
+
+`run_stage0_x86.sh` + `X86_WORKSTATION.md`: one command on an x86-64 Linux host clones the
+sibling repo, fetches SIFT, builds the env + RaBitQ binaries (incl `exp_dumpids`) + b=7 index,
+and runs the full suite (parity included) + the live ≈0.983 baseline gate.
 
 ## Known limitation — deferred to Stage 1
 

@@ -4,6 +4,7 @@ Predicate truth-table + gt/direction sanity. Everything delegates to qp.metrics 
 source of truth); these tests pin the semantics the brief specifies.
 """
 import numpy as np
+import pytest
 
 from qp import metrics
 import phase3_recall as pr
@@ -59,6 +60,26 @@ def test_tolerant_recall_at_least_traditional():
     pred = gt[:, :10].copy()
     block = pr.recall_block(pred, gt, gt_dist=gt_dist, ks=(10,))
     assert block["tolerant_recall@10"] >= block["recall@10"] - 1e-9
+
+
+def test_tolerant_recall_requires_aligned_gt_dist():
+    # gt_dist must be column-aligned with gt_ids; a k-wide gt_dist against a 100-wide gt_ids
+    # is a caller error and must raise a clear ValueError (previously a cryptic IndexError).
+    gt = np.tile(np.arange(100), (5, 1))               # (5,100)
+    gt_dist = np.tile(np.linspace(1, 2, 10), (5, 1))   # (5,10) -- mis-sliced
+    pred = gt[:, :10].copy()
+    with pytest.raises(ValueError):
+        pr.recall_block(pred, gt, gt_dist=gt_dist, ks=(1, 10))
+
+
+def test_recall_block_skips_k_over_prediction_width():
+    # RaBitQ returns only W=10 ids; recall@100 over them can never exceed 0.1, so a requested
+    # k>W is skipped rather than reported as a misleading structurally-capped value.
+    gt = np.tile(np.arange(100), (5, 1))               # (5,100)
+    pred = gt[:, :10].copy()                            # 10-wide predictions
+    out = pr.recall_block(pred, gt)                     # default ks = (1, 10, 100)
+    assert "recall@100" not in out
+    assert out["recall@1"] == 1.0 and out["recall@10"] == 1.0
 
 
 def test_classify_passthrough():

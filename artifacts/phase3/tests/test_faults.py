@@ -93,6 +93,16 @@ def test_cross_row_pairs_same_offset():
     assert b1 - b0 == stride, "second flip must be one row (stride) later"
 
 
+def test_cross_row_rejects_bad_region():
+    # cross_row must validate its region like the other injectors (it previously read
+    # region[0]/region[1] raw, so a negative byte_start numpy-wrapped instead of raising).
+    buf = _buf(256)
+    with pytest.raises(ValueError):
+        faults.cross_row(buf, (-5, 40), stride=8, seed=1)     # negative byte_start
+    with pytest.raises(ValueError):
+        faults.cross_row(buf, (0, 0), stride=8, seed=1)       # empty region
+
+
 def test_spatial_cluster_deterministic_and_restore():
     region = (0, 4096)
     before = _buf()

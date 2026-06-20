@@ -9,21 +9,28 @@ with the recovery policy applied), parsed by the qp.rabitq adapter.
 Keeping this a wrapper is the whole point of Stage 0: the RaBitQ work and the FAISS work
 (Phase 1/2) score recall and collapse with the same code, so cross-repo parity holds.
 """
+import numpy as np
+
 from qp import config, metrics
 
 
 def recall_block(pred_ids, gt_ids, gt_dist=None, ks=None, eps=None):
     """Canonical recall summary for one (corrupted or clean) result set.
 
-    pred_ids : (N, >=max(ks)) neighbour ids from the search path (RaBitQ querying binary).
+    pred_ids : (N, W) neighbour ids from the search path (RaBitQ querying binary returns W=10).
     gt_ids   : (N, >=max(ks)) exact ground-truth ids (fixed across the study).
-    gt_dist  : (N, >=k) exact distances aligned with gt_ids; required only for tolerant recall.
-    Returns a dict: {'recall@1':..., 'recall@10':..., 'recall@100':..., 'tolerant_recall@10':...}.
+    gt_dist  : exact distances aligned COLUMN-FOR-COLUMN with gt_ids (same shape); required
+               only for tolerant recall.
+    Returns {'recall@k': ...} for each requested k that fits the prediction width W, plus
+    'tolerant_recall@K' when gt_dist is given and config.K <= W. A requested k>W is SKIPPED,
+    not reported: the RaBitQ path returns only W=10 ids, so recall@100 over it could never
+    exceed 0.1 and would misread as catastrophic loss rather than a measurement-width artifact.
     """
     ks = tuple(config.RECALL_KS) if ks is None else tuple(ks)
     eps = config.EPSILON_TOLERANT if eps is None else eps
-    out = {f"recall@{k}": metrics.recall_at_k(pred_ids, gt_ids, k) for k in ks}
-    if gt_dist is not None:
+    ncols = np.asarray(pred_ids).shape[1]
+    out = {f"recall@{k}": metrics.recall_at_k(pred_ids, gt_ids, k) for k in ks if k <= ncols}
+    if gt_dist is not None and config.K <= ncols:
         out[f"tolerant_recall@{config.K}"] = metrics.tolerant_recall(
             pred_ids, gt_ids, gt_dist, config.K, eps)
     return out

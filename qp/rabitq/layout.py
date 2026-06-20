@@ -34,44 +34,44 @@ parse_header() upgrades the size fields to "header-parsed" when given a real ind
 """
 import struct
 
-SIZE_T = 8
+# Byte widths used in level0 offset arithmetic (header field widths now live as struct codes
+# in HEADER_FIELDS). PID = uint32 element/cluster id; FLOAT = sizeof(float) centroid/factor.
 PID = 4
-INT = 4
-DOUBLE = 8
 FLOAT = 4
 
 BIN_FACTORS_BYTES = 3 * FLOAT   # f_add, f_rescale, f_error
 EX_FACTORS_BYTES = 2 * FLOAT    # f_add_ex, f_rescale_ex
 
 # Ordered header fields exactly as HierarchicalNSW::save() writes them (hnsw.hpp L468-492).
-# (name, byte_size). 17 size_t + label_offset(PID) + maxlevel(int) + enterpoint(PID) +
-# mult(double) = 136 + 4 + 4 + 4 + 8 = 156 bytes.
+# (name, struct_code) — the little-endian format code is carried PER FIELD so the parser is
+# unambiguous. (An earlier byte-size-keyed lookup table silently collapsed: sizeof(size_t)==
+# sizeof(double)==8 and sizeof(PID)==sizeof(int)==4, so {8:"<Q",4:"<I",4:"<i",8:"<d"} became
+# {8:"<d",4:"<i"} and every size_t parsed as a double.) 17 size_t (<Q) + label_offset (<I) +
+# maxlevel (<i) + enterpoint (<I) + mult (<d) = 136 + 4 + 4 + 4 + 8 = 156 bytes.
 HEADER_FIELDS = [
-    ("max_elements", SIZE_T),
-    ("cur_element_count", SIZE_T),
-    ("dim", SIZE_T),
-    ("padded_dim", SIZE_T),
-    ("num_cluster", SIZE_T),
-    ("ex_bits", SIZE_T),
-    ("size_bin_data", SIZE_T),
-    ("size_ex_data", SIZE_T),
-    ("size_links_level0", SIZE_T),
-    ("offsetBinData", SIZE_T),
-    ("offsetExData", SIZE_T),
-    ("label_offset", PID),
-    ("size_data_per_element", SIZE_T),
-    ("size_links_per_element", SIZE_T),
-    ("maxlevel", INT),
-    ("enterpoint_node", PID),
-    ("M", SIZE_T),
-    ("maxM", SIZE_T),
-    ("maxM0", SIZE_T),
-    ("mult", DOUBLE),
-    ("ef_construction", SIZE_T),
+    ("max_elements", "<Q"),
+    ("cur_element_count", "<Q"),
+    ("dim", "<Q"),
+    ("padded_dim", "<Q"),
+    ("num_cluster", "<Q"),
+    ("ex_bits", "<Q"),
+    ("size_bin_data", "<Q"),
+    ("size_ex_data", "<Q"),
+    ("size_links_level0", "<Q"),
+    ("offsetBinData", "<Q"),
+    ("offsetExData", "<Q"),
+    ("label_offset", "<I"),
+    ("size_data_per_element", "<Q"),
+    ("size_links_per_element", "<Q"),
+    ("maxlevel", "<i"),
+    ("enterpoint_node", "<I"),
+    ("M", "<Q"),
+    ("maxM", "<Q"),
+    ("maxM0", "<Q"),
+    ("mult", "<d"),
+    ("ef_construction", "<Q"),
 ]
-HEADER_BYTES = sum(sz for _, sz in HEADER_FIELDS)   # == 156
-
-_STRUCT_CODE = {SIZE_T: "<Q", PID: "<I", INT: "<i", DOUBLE: "<d"}
+HEADER_BYTES = sum(struct.calcsize(code) for _, code in HEADER_FIELDS)   # == 156
 
 
 def round_up_to_multiple(x, m):
@@ -120,9 +120,9 @@ def parse_header(source):
     if len(raw) < HEADER_BYTES:
         raise ValueError(f"index too short: need {HEADER_BYTES} header bytes, got {len(raw)}")
     out, off = {}, 0
-    for name, sz in HEADER_FIELDS:
-        out[name] = struct.unpack_from(_STRUCT_CODE[sz], raw, off)[0]
-        off += sz
+    for name, code in HEADER_FIELDS:
+        out[name] = struct.unpack_from(code, raw, off)[0]
+        off += struct.calcsize(code)
     return out
 
 
@@ -141,26 +141,38 @@ def _region(name, kind, byte_start, byte_len, *, protect, semantic, verified=Fal
     }
 
 
-def element_regions(padded_dim, ex_bits, maxM0):
+def element_regions(padded_dim, ex_bits, maxM0, off_bin=None, off_ex=None):
     """Per-element sub-regions (offset within one LEVEL0 element block, length, kind).
 
     Returns a list of dicts with offset_in_element / byte_len / kind. Pure formula from the
     save() offset math — exact, independent of any built index.
+
+    ``off_bin`` / ``off_ex`` override the formula offsets with the AUTHORITATIVE header
+    offsetBinData / offsetExData when a real index is available (serialized_region_map passes
+    them); left ``None`` they fall back to the source-derived formula — the only path the
+    offline tests/golden exercise. A b=1 index has ``ex_bits==0`` and therefore NO ex block
+    (mirrors ex_data_bytes); emitting one would overshoot size_data_per_element by 8 bytes and
+    push every later offset into the next element.
     """
     links_len = size_links_level0(maxM0)
-    off_bin = links_len + PID + PID                # cluster_id (PID) + label (PID)
+    if off_bin is None:
+        off_bin = links_len + PID + PID            # cluster_id (PID) + label (PID)
     bin_code_len = padded_dim // 8
-    off_ex = off_bin + bin_data_bytes(padded_dim)
-    ex_code_len = padded_dim * ex_bits // 8
+    if off_ex is None:
+        off_ex = off_bin + bin_data_bytes(padded_dim)
     regs = [
         ("links",       "graph_edges", 0,                          links_len,        "pointer"),
         ("cluster_id",  "codes_meta",  links_len,                  PID,              "pointer"),
         ("label",       "codes_meta",  links_len + PID,            PID,              "pointer"),
         ("bin_code",    "codes",       off_bin,                    bin_code_len,     "large_bulk"),
         ("bin_factors", "sq_scale",    off_bin + bin_code_len,     BIN_FACTORS_BYTES,"critical_global"),
-        ("ex_code",     "codes",       off_ex,                     ex_code_len,      "large_bulk"),
-        ("ex_factors",  "sq_scale",    off_ex + ex_code_len,       EX_FACTORS_BYTES, "large_bulk"),
     ]
+    if ex_bits > 0:                                # no ex block on a b=1 index (ex_data_bytes==0)
+        ex_code_len = padded_dim * ex_bits // 8
+        # ex_factors is a tiny per-vector decode scale (f_add_ex/f_rescale_ex), same criticality
+        # class as bin_factors — not bulk.
+        regs.append(("ex_code",    "codes",    off_ex,               ex_code_len,      "large_bulk"))
+        regs.append(("ex_factors", "sq_scale", off_ex + ex_code_len, EX_FACTORS_BYTES, "critical_global"))
     return [
         {"name": n, "kind": k, "offset_in_element": int(o), "byte_len": int(L), "protect": p}
         for (n, k, o, L, p) in regs
@@ -198,7 +210,9 @@ def serialized_region_map(header, file_size=None):
     ]
     # Per-element sub-regions for element 0 (absolute file offsets), so a fault model can
     # target a specific structure (e.g. bin_factors == the per-vector error bound).
-    for er in element_regions(pd, ex_bits, header["maxM0"]):
+    for er in element_regions(pd, ex_bits, header["maxM0"],
+                              off_bin=header.get("offsetBinData") or None,
+                              off_ex=header.get("offsetExData") or None):
         regions.append(_region(
             f"elem0.{er['name']}", er["kind"],
             level0_start + er["offset_in_element"], er["byte_len"],

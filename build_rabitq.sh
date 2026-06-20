@@ -68,26 +68,14 @@ fi
 say "[3/7] copying experiment sources into sample/"
 cp "$INSTR/exp_faultinject.cpp" "$INSTR/exp_fieldflip.cpp" "$LIB/sample/" || fail "copy exp_*.cpp failed"
 
-# 3b. macOS/AppleClang OpenMP flag fix (build-portability only; no logic change) ----
-# Upstream CMAKE_CXX_FLAGS hard-codes "-fopenmp -lrt" via SET(...), which clobbers any -D
-# override and which Apple's stock clang rejects (no bundled OpenMP; -lrt is Linux-only).
-# Rewrite ONLY the flags line to the libomp recipe: -Xclang -fopenmp + libomp include/lib.
-# Re-applied every run because the step-1 checkout restores the pristine file first.
-if [ "$(uname)" = "Darwin" ]; then
-  LIBOMP="$(brew --prefix libomp 2>/dev/null)"
-  [ -d "$LIBOMP" ] || fail "libomp not found (brew install libomp)"
-  say "[3/7] patching CMAKE_CXX_FLAGS for AppleClang+libomp ($LIBOMP)"
-  NEWFLAGS="-Wall -Ofast -Wextra -march=native -fpic -Xclang -fopenmp -I$LIBOMP/include -L$LIBOMP/lib -lomp -ftree-vectorize -fexceptions"
-  /usr/bin/sed -i '' -E "s|^SET\\(CMAKE_CXX_FLAGS.*|SET(CMAKE_CXX_FLAGS  \"$NEWFLAGS\")|" "$LIB/CMakeLists.txt"
-  grep -q 'Xclang' "$LIB/CMakeLists.txt" || fail "CMAKE_CXX_FLAGS flag-patch did not apply"
-fi
-
-# 3c. ARCHITECTURE GATE ---------------------------------------------------
+# 3b. ARCHITECTURE GATE ---------------------------------------------------
 # RaBitQ-Library's core (utils/space.hpp, quantization/rabitq_impl.hpp, index/ivf|hnsw)
 # unconditionally includes <emmintrin.h>/<immintrin.h> and uses native AVX2/AVX512
 # instructions with NO aarch64/NEON path. It does not compile on Apple Silicon (arm64).
 # Steps 1-3 (clone/pin/patch — useful for reading the byte layout from source) already ran;
 # the build + live baseline require an x86-64 host (where Samuel's results were produced).
+# This gate runs BEFORE the macOS/libomp build-prep below so the documented arm64 host
+# reports-and-stops cleanly (exit 2) instead of failing on a missing libomp it will never use.
 # Override with FORCE_BUILD=1 only if you have ported the SIMD.
 ARCH="$(uname -m)"
 if [ "$ARCH" != "x86_64" ] && [ "${FORCE_BUILD:-0}" != "1" ]; then
@@ -101,6 +89,21 @@ if [ "$ARCH" != "x86_64" ] && [ "${FORCE_BUILD:-0}" != "1" ]; then
     UNCHANGED on an x86-64 Linux host (cmake + libomp present). It is idempotent.
 EOF
   exit 2
+fi
+
+# 3c. macOS/AppleClang OpenMP flag fix (build-portability only; no logic change) ----
+# Upstream CMAKE_CXX_FLAGS hard-codes "-fopenmp -lrt" via SET(...), which clobbers any -D
+# override and which Apple's stock clang rejects (no bundled OpenMP; -lrt is Linux-only).
+# Rewrite ONLY the flags line to the libomp recipe: -Xclang -fopenmp + libomp include/lib.
+# Re-applied every run because the step-1 checkout restores the pristine file first.
+# Only reached on an x86-64 macOS host (the arch gate above already stopped arm64).
+if [ "$(uname)" = "Darwin" ]; then
+  LIBOMP="$(brew --prefix libomp 2>/dev/null)"
+  [ -d "$LIBOMP" ] || fail "libomp not found (brew install libomp)"
+  say "[3/7] patching CMAKE_CXX_FLAGS for AppleClang+libomp ($LIBOMP)"
+  NEWFLAGS="-Wall -Ofast -Wextra -march=native -fpic -Xclang -fopenmp -I$LIBOMP/include -L$LIBOMP/lib -lomp -ftree-vectorize -fexceptions"
+  /usr/bin/sed -i '' -E "s|^SET\\(CMAKE_CXX_FLAGS.*|SET(CMAKE_CXX_FLAGS  \"$NEWFLAGS\")|" "$LIB/CMakeLists.txt"
+  grep -q 'Xclang' "$LIB/CMakeLists.txt" || fail "CMAKE_CXX_FLAGS flag-patch did not apply"
 fi
 
 # 4. BUILD ----------------------------------------------------------------

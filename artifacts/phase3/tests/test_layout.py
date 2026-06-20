@@ -41,18 +41,84 @@ def test_element_regions_contiguous_and_total():
     assert bf["protect"] == "critical_global"
 
 
+def test_ex_factors_protect_matches_bin_factors():
+    # ex_factors is a tiny per-vector decode scale (f_add_ex/f_rescale_ex), the same
+    # criticality class as bin_factors — not bulk.
+    regs = layout.element_regions(128, 6, 32)
+    bf = next(r for r in regs if r["name"] == "bin_factors")
+    ef = next(r for r in regs if r["name"] == "ex_factors")
+    assert ef["protect"] == bf["protect"] == "critical_global"
+
+
+def test_element_regions_no_ex_block_when_ex_bits_zero():
+    # b=1 index: ex_bits=0 -> NO ex_code/ex_factors (mirror ex_data_bytes==0). The element
+    # block must total exactly size_links_level0 + 2*PID + bin_data_bytes with no 8B overshoot.
+    pd, maxM0 = 128, 32
+    regs = layout.element_regions(pd, 0, maxM0)
+    names = [r["name"] for r in regs]
+    assert "ex_code" not in names and "ex_factors" not in names
+    cursor = 0
+    for r in regs:
+        assert r["offset_in_element"] == cursor, f"gap/overlap before {r['name']}"
+        cursor += r["byte_len"]
+    expected = (layout.size_links_level0(maxM0) + 2 * layout.PID
+                + layout.bin_data_bytes(pd) + layout.ex_data_bytes(pd, 0))
+    assert cursor == expected == 168
+
+
+def test_element_regions_honors_offset_overrides():
+    # The authoritative header offsetBinData/offsetExData (real index w/ padding) win over the
+    # source-derived formula when supplied.
+    regs = layout.element_regions(128, 6, 32, off_bin=200, off_ex=300)
+    bc = next(r for r in regs if r["name"] == "bin_code")
+    ec = next(r for r in regs if r["name"] == "ex_code")
+    assert bc["offset_in_element"] == 200
+    assert ec["offset_in_element"] == 300
+
+
+def test_serialized_region_map_uses_header_offsets():
+    # When parse_header supplies offsetBinData/offsetExData, serialized_region_map locates the
+    # per-element sub-regions from them, not the formula.
+    header = {
+        "padded_dim": 128, "ex_bits": 6, "num_cluster": 16, "cur_element_count": 10,
+        "maxM0": 32, "offsetBinData": 200, "offsetExData": 300,
+        "size_data_per_element": 400,
+    }
+    centroids = 16 * 128 * layout.FLOAT
+    file_size = layout.HEADER_BYTES + centroids + 10 * 400 + layout.rotation_bytes(128)
+    rmap = layout.serialized_region_map(header, file_size=file_size)
+    level0_start = layout.HEADER_BYTES + centroids
+    bc = next(r for r in rmap["regions"] if r["name"] == "elem0.bin_code")
+    assert bc["byte_start"] == level0_start + 200
+
+
 def test_parse_header_roundtrip():
-    # build a synthetic 156-byte header and read it back
+    # build a synthetic 156-byte header (per-field struct code) and read it back
     vals = {name: (i + 1) for i, (name, _) in enumerate(layout.HEADER_FIELDS)}
     blob = b""
-    for name, sz in layout.HEADER_FIELDS:
-        code = layout._STRUCT_CODE[sz]
+    for name, code in layout.HEADER_FIELDS:
         blob += struct.pack(code, vals[name] if code != "<d" else float(vals[name]))
     assert len(blob) == 156
     parsed = layout.parse_header(blob)
     assert parsed["padded_dim"] == vals["padded_dim"]
     assert parsed["num_cluster"] == vals["num_cluster"]
     assert parsed["ex_bits"] == vals["ex_bits"]
+
+
+def test_parse_header_reads_size_t_as_int_not_double():
+    # Regression for the _STRUCT_CODE byte-size collision: a size_t field written by the C++
+    # save() as a raw uint64 must parse back as the SAME integer, not be reinterpreted as a
+    # double. Under the old {8:"<Q",4:"<I",4:"<i",8:"<d"} -> {8:"<d",4:"<i"} collapse,
+    # padded_dim=128 came back as 6.3e-322. We pack a real-format header and assert the
+    # integer survives (and the one genuine double field still round-trips).
+    blob = b""
+    for name, code in layout.HEADER_FIELDS:
+        blob += struct.pack(code, 128 if name == "padded_dim"
+                            else (1.5 if code == "<d" else 1))
+    parsed = layout.parse_header(blob)
+    assert parsed["padded_dim"] == 128 and isinstance(parsed["padded_dim"], int)
+    assert parsed["mult"] == 1.5                      # the lone <d field still parses as float
+    assert isinstance(parsed["maxlevel"], int)        # <i field
 
 
 def test_serialized_region_map_locates_rotation_at_tail():

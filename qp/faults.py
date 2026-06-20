@@ -68,9 +68,14 @@ def uniform_p(buf, region, p, seed):
         raise ValueError(f"p must be in [0,1], got {p}")
     byte_start, n_bits = _region_bounds(region)
     rng = np.random.default_rng(seed)
-    hit = rng.random(n_bits) < p                       # iid Bernoulli(p) per bit
-    bit_offsets = np.nonzero(hit)[0]
-    positions = [_bit_to_pos(byte_start, b) for b in bit_offsets]
+    # Memory-safe: draw the flip COUNT from Binomial(n_bits, p), then sample that many distinct
+    # bit offsets — instead of materializing one float per region bit. A whole-index region is
+    # ~1e9+ bits, so rng.random(n_bits) would allocate a multi-GB float array. O(count) memory,
+    # deterministic in seed. (Trade-off: the flipped set is an iid sample of size Binomial(N,p),
+    # so it is NOT nested across p the way the old per-bit threshold method was.)
+    count = int(rng.binomial(n_bits, p))
+    bit_offsets = rng.choice(n_bits, size=count, replace=False)
+    positions = [_bit_to_pos(byte_start, int(b)) for b in bit_offsets]
     flip_bits(buf, positions)
     return positions
 
@@ -116,7 +121,8 @@ def cross_row(buf, region, stride, seed):
     row; the same in-row offset is flipped again ``stride`` bytes later. Returns both
     positions (so restore undoes the pair). Deterministic in ``seed``.
     """
-    byte_start, byte_len = int(region[0]), int(region[1])
+    byte_start, n_bits = _region_bounds(region)         # validates byte_start>=0, byte_len>0
+    byte_len = n_bits // 8
     if stride <= 0:
         raise ValueError(f"stride must be >0, got {stride}")
     if 2 * stride > byte_len:

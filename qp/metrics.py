@@ -78,13 +78,20 @@ def tolerant_recall(pred_ids, gt_ids, gt_dist, k, eps):
 
     For each query the acceptable set is every true neighbor whose exact distance is
     <= (1+eps) * (kth true distance). A predicted top-k id counts if it is in that set.
-    gt_dist: (N, >=k) exact L2 distances aligned with gt_ids (from FLAT in Phase 0).
+    gt_dist: exact L2 distances aligned COLUMN-FOR-COLUMN with gt_ids (SAME shape), from FLAT
+    in Phase 0. The acceptable mask indexes gt_ids with a mask shaped like gt_dist, so the two
+    must have the same column count — a k-wide gt_dist against a 100-wide gt_ids is a caller
+    error (mis-sliced input), not a narrower ground truth.
     """
     pred = np.asarray(pred_ids)[:, :k]
     truth = np.asarray(gt_ids)
     gd = np.asarray(gt_dist)
+    if gd.shape[1] != truth.shape[1]:
+        raise ValueError(
+            f"gt_dist and gt_ids must be column-aligned (same #neighbours); got gt_dist "
+            f"{gd.shape} vs gt_ids {truth.shape} — slice both to the same width, not just one")
     thresh = gd[:, k - 1] * (1.0 + eps)                 # (N,)
-    acceptable = gd <= thresh[:, None]                  # (N, 100) bool mask over GT
+    acceptable = gd <= thresh[:, None]                  # (N, Ngt) bool mask over GT
     n = pred.shape[0]
     hits = 0
     for q in range(n):

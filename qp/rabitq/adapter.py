@@ -93,8 +93,12 @@ def region_map(path=None):
 # --- dataset / query / ground-truth loaders ----------------------------------
 
 def load_query():
-    """Fixed query set (prepared/query.fvecs) — reuses qp.data.read_fvecs."""
-    return read_fvecs(os.path.join(PREP, "query.fvecs"))
+    """Fixed query set (prepared/query.fvecs) — reuses qp.data.read_fvecs.
+
+    read_fvecs returns ``(array, dim)``; return just the ``(N, dim)`` array so this matches
+    load_groundtruth and qp.data.load_query (callers expect a bare ndarray, not a 2-tuple).
+    """
+    return read_fvecs(os.path.join(PREP, "query.fvecs"))[0]
 
 
 def load_groundtruth():

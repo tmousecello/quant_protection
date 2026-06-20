@@ -48,6 +48,16 @@ locates it at the file tail.
   addition (an ids-dump flag writing top-k ivecs). Flagged, not implemented. The metric-level
   parity (qp.metrics vs an independent reference) passes now.
 
+## Known limitation — deferred to Stage 1
+
+- **Per-vector cost aggregation.** `layout.serialized_region_map` exposes per-element
+  sub-regions for **element 0 only** (`elem0.bin_factors` is one 12-byte slice). Feeding that
+  map to `phase3_cost.mem_cost` and protecting a per-vector structure prices only ONE element,
+  so the protection-memory estimate is short by a factor of `cur_element_count` (~10⁶ for
+  SIFT1M). Stage 1 must add an aggregate per-structure region (size × `cur_element_count`) or
+  pass an element count into `mem_cost` before any per-vector protection budget is trusted.
+  The cost formulas themselves are correct for the region map they are given.
+
 ## To finish Stage 0 acceptance on the right machine
 1. `bash build_rabitq.sh` on an x86-64 Linux host (cmake + libomp present) → binaries + b=7 index.
 2. Confirm `adapter.clean_baseline_recall()` ≈ 0.983 (anchors the whole study).

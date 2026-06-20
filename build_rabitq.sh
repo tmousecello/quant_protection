@@ -68,6 +68,17 @@ fi
 say "[3/7] copying experiment sources into sample/"
 cp "$INSTR/exp_faultinject.cpp" "$INSTR/exp_fieldflip.cpp" "$LIB/sample/" || fail "copy exp_*.cpp failed"
 
+# Our Stage 0 parity instrument lives in quant_protection (not Samuel's repo): copy it in and
+# register a CMake target alongside the patched ones. Idempotent (skip the append if present).
+DUMPIDS_SRC="$QP_ROOT/rabitq_instrumentation/exp_dumpids.cpp"
+if [ -f "$DUMPIDS_SRC" ]; then
+  cp "$DUMPIDS_SRC" "$LIB/sample/" || fail "copy exp_dumpids.cpp failed"
+  if ! grep -q 'exp_dumpids' "$LIB/sample/CMakeLists.txt"; then
+    say "[3/7] registering exp_dumpids CMake target"
+    printf '\nadd_executable(exp_dumpids exp_dumpids.cpp)\n' >> "$LIB/sample/CMakeLists.txt"
+  fi
+fi
+
 # 3b. ARCHITECTURE GATE ---------------------------------------------------
 # RaBitQ-Library's core (utils/space.hpp, quantization/rabitq_impl.hpp, index/ivf|hnsw)
 # unconditionally includes <emmintrin.h>/<immintrin.h> and uses native AVX2/AVX512
@@ -107,7 +118,9 @@ if [ "$(uname)" = "Darwin" ]; then
 fi
 
 # 4. BUILD ----------------------------------------------------------------
-if [ ! -x "$BIN/hnsw_rabitq_querying" ] || [ ! -x "$BIN/exp_faultinject" ]; then
+# Include exp_dumpids in the cache check so a stale build that predates it triggers a rebuild.
+if [ ! -x "$BIN/hnsw_rabitq_querying" ] || [ ! -x "$BIN/exp_faultinject" ] \
+   || [ ! -x "$BIN/exp_dumpids" ]; then
   say "[4/7] cmake + make (native build; this takes a few minutes)"
   ( cd "$LIB" && rm -rf build && mkdir build && cd build \
       && cmake .. -DCMAKE_BUILD_TYPE=Release \
@@ -115,7 +128,7 @@ if [ ! -x "$BIN/hnsw_rabitq_querying" ] || [ ! -x "$BIN/exp_faultinject" ]; then
 else
   say "[4/7] build: cached"
 fi
-for b in hnsw_rabitq_indexing hnsw_rabitq_querying exp_faultinject exp_fieldflip; do
+for b in hnsw_rabitq_indexing hnsw_rabitq_querying exp_faultinject exp_fieldflip exp_dumpids; do
   [ -x "$BIN/$b" ] || fail "expected binary $BIN/$b not produced"
 done
 

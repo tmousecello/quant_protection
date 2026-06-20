@@ -17,6 +17,7 @@ import subprocess
 
 import numpy as np
 
+from qp import config
 from qp.data import read_fvecs, read_ivecs
 from qp.rabitq import layout
 
@@ -32,7 +33,8 @@ INDEX_PATH = os.path.join(RABITQ_REPO, "results", "datasets", "sift", "idx",
                           "hnsw_M16_efC200_b7.index")
 METRIC = "l2"
 
-BINARIES = ("hnsw_rabitq_indexing", "hnsw_rabitq_querying", "exp_faultinject", "exp_fieldflip")
+BINARIES = ("hnsw_rabitq_indexing", "hnsw_rabitq_querying", "exp_faultinject",
+            "exp_fieldflip", "exp_dumpids")
 
 # Documented anchor for golden comparison (results/datasets/sift/ladder.csv plateau, b=7).
 # This is a REFERENCE constant, never returned as if it were a fresh measurement.
@@ -147,14 +149,31 @@ def clean_baseline_recall(index_path=None):
     return max(table.values())
 
 
-def query_ids(index_path=None, k=10):
-    """Per-query neighbour ids from the real search path — needed for qp-vs-C++ parity.
+def query_ids(index_path=None, k=None, ef=2000, out_path=None, query_f=None, gt_f=None):
+    """Per-query top-k neighbour ids from the real search path, plus the C++-side recall.
 
-    REPORT-AND-STOP: hnsw_rabitq_querying / exp_faultinject print recall scalars only; neither
-    emits per-query ids. Wiring the parity check requires a small instrumentation addition (an
-    ids-dump flag writing an ivecs of the top-k ids), then parse it here. Flagged, not faked.
+    Runs the exp_dumpids instrument (built by build_rabitq.sh) at a single `ef`, which writes
+    the ids as ivecs and prints `RECALL\\t<r>`. Returns (ids, cpp_recall):
+      ids        : (nq, k) int32 array (qp.data.read_ivecs); -1 marks a padded/missing slot.
+      cpp_recall : the binary's recall@k on those same ids — the parity counterpart to
+                   qp.metrics.recall_at_k(ids, gt, k).
+    `ef` defaults high (2000) to sit on the recall plateau (~0.983). Gated on the x86-64 build.
     """
-    raise NotImplementedError(
-        "query_ids requires an ids-dump from the C++ querying binary (a small instrumentation "
-        "addition). Until then the qp-vs-C++ recall parity on a real index is blocked. See "
-        "artifacts/phase3/STAGE0_STATUS.md.")
+    _require_binaries()
+    k = config.K if k is None else int(k)
+    index_path = index_path or INDEX_PATH
+    query_f = query_f or os.path.join(PREP, "query.fvecs")
+    gt_f = gt_f or os.path.join(PREP, "groundtruth.ivecs")
+    out_path = out_path or os.path.join(PREP, f"_dumpids_ef{int(ef)}_k{k}.ivecs")
+    cmd = [os.path.join(BIN, "exp_dumpids"), index_path, query_f, gt_f, METRIC,
+           str(int(ef)), out_path, str(k)]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    cpp_recall = None
+    for line in res.stdout.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) == 2 and parts[0] == "RECALL":
+            cpp_recall = float(parts[1])
+    if cpp_recall is None:
+        raise RuntimeError(f"exp_dumpids did not print a RECALL line; stdout:\n{res.stdout}")
+    ids = read_ivecs(out_path)
+    return ids, cpp_recall

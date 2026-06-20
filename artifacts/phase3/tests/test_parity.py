@@ -36,17 +36,20 @@ def test_metric_parity_against_reference():
 @pytest.mark.skipif(not adapter.binaries_built(),
                     reason="RaBitQ C++ binaries not built (x86-64 only); see build_rabitq.sh")
 def test_rabitq_parity_clean_index():
-    """qp-imported recall == Samuel's C++ recall on the clean b=7 index, same query/gt.
+    """qp-imported recall == Samuel's C++ recall on the clean b=7 index — same ids, same query/gt.
 
-    Also blocked on adapter.query_ids (needs a C++ ids dump). When both are available:
-      ids = adapter.query_ids(adapter.INDEX_PATH, k=config.K)
-      qp_recall = metrics.recall_at_k(ids, adapter.load_groundtruth(), config.K)
-      cpp_recall = adapter.clean_baseline_recall()
-      assert qp_recall == pytest.approx(cpp_recall, abs=1e-3)
-    and the clean baseline must sit near adapter.EXPECTED_CLEAN_RECALL10 (~0.983).
+    The keystone Stage 0 acceptance. exp_dumpids runs the real search path (bin traversal +
+    ex/refine rerank, recovery policy applied) and emits both the top-k ids and its own
+    recall@k on those ids. We recompute recall with the imported qp.metrics on the SAME ids:
+    the two must agree (proves the single-source metric is identical to Samuel's), and the
+    clean b=7 value must sit on the ~0.983 plateau (anchors the whole study).
     """
-    cpp_recall = adapter.clean_baseline_recall()
-    assert abs(cpp_recall - adapter.EXPECTED_CLEAN_RECALL10) < 0.01, \
-        f"clean b=7 recall {cpp_recall} not near {adapter.EXPECTED_CLEAN_RECALL10}"
-    pytest.skip("qp-vs-C++ id-level parity blocked on adapter.query_ids (C++ ids dump). "
-                "Baseline anchor verified above.")
+    from qp import config
+
+    ids, cpp_recall = adapter.query_ids(adapter.INDEX_PATH, k=config.K, ef=2000)
+    gt = adapter.load_groundtruth()
+    qp_recall = metrics.recall_at_k(ids, gt, config.K)
+    assert qp_recall == pytest.approx(cpp_recall, abs=1e-3), \
+        f"qp recall {qp_recall} != C++ recall {cpp_recall} on identical ids"
+    assert abs(qp_recall - adapter.EXPECTED_CLEAN_RECALL10) < 0.01, \
+        f"clean b=7 recall {qp_recall} not near {adapter.EXPECTED_CLEAN_RECALL10}"

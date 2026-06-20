@@ -15,8 +15,11 @@ XOR over B consecutive bits). Because a burst can straddle the header / graph st
 segfault FAISS, EVERY trial runs in its own subprocess via qp.isolation (segfault / hang ->
 `crash`); the pristine buffer is dumped once to a temp .npy the children mmap.
 
-Collapse is RELATIVE for PQ (retention < config.PHASE2_PQ_RETENTION_FRAC of own clean) and
-ABSOLUTE (ΔR@10 > buckets.CATASTROPHIC_ABS) for the aligned indexes — matching Tier 1/3.
+Collapse uses the UNIFIED retention rule for every index (faulted recall@10 <
+config.COLLAPSE_RETENTION_FRAC of own clean; see qp.metrics.is_silent_collapse) and is
+SILENT-only — a crash / nan-inf is detectable and counted separately (n_crash / n_nan_inf),
+not as collapse. This matches Curve B (Tier 3), which already excludes crashes, and removes
+the old absolute-vs-relative split that made fp32 appear to collapse under a large burst.
 
 Outputs (under <out>/burst/):
   <index>_burst.csv   per (index, B): P(collapse), ΔR@10 distribution, failure counts,
@@ -38,7 +41,7 @@ import numpy as np
 
 import faiss
 
-from qp import config, data, buckets, metrics
+from qp import config, data, metrics
 from qp import indexes as ix
 from qp.flip import to_buffer, burst_positions
 from qp import isolation
@@ -68,15 +71,13 @@ def region_index(regions):
     return hit
 
 
-def is_collapse(rec, clean10, baseline_mode, frac):
-    if rec["failure_mode"] == metrics.CRASH:
-        return True
-    f10 = rec["faulted_recall@10"]
-    if f10 is None:
-        return True
-    if baseline_mode == "own":
-        return f10 < frac * clean10
-    return (clean10 - f10) > buckets.CATASTROPHIC_ABS
+def is_silent_collapse(rec, clean10, frac):
+    """Unified, silent-only collapse for a burst trial. Crash / nan-inf are detectable and
+    counted separately (n_crash / n_nan_inf), so they are NOT silent collapse. failure_mode is
+    forwarded because a nan-inf trial still carries a numeric faulted_recall@10 (recall is
+    computed from the ids even when distances are non-finite) and would otherwise be miscounted."""
+    return metrics.is_silent_collapse(rec.get("faulted_recall@10"), clean10, frac,
+                                      failure_mode=rec.get("failure_mode"))
 
 
 def sweep_index(name, spec, knob_val, paths, sub, args):
@@ -122,7 +123,7 @@ def sweep_index(name, spec, knob_val, paths, sub, args):
             rec.update({"index": name, "B_bits": B, "start_bit": start_bit,
                         "start_region": hit_of(start_bit // 8),
                         "end_region": hit_of((start_bit + B - 1) // 8),
-                        "collapse": is_collapse(rec, clean10, baseline_mode, args.pq_retention_frac)})
+                        "silent_collapse": is_silent_collapse(rec, clean10, args.pq_retention_frac)})
             raw_fh.write(json.dumps(rec) + "\n")
             trials.append(rec)
             n_harness += int(rec["failure_mode"] == isolation.HARNESS_ERROR)
@@ -135,7 +136,7 @@ def sweep_index(name, spec, knob_val, paths, sub, args):
             hits[t["start_region"]] = hits.get(t["start_region"], 0) + 1
         rows.append({
             "index": name, "B_bits": B, "n_trials": n,
-            "p_collapse": sum(t["collapse"] for t in trials) / n if n else None,
+            "p_silent_collapse": sum(t["silent_collapse"] for t in trials) / n if n else None,
             "mean_dR@10": float(d10.mean()) if d10.size else None,
             "p99_dR@10": float(np.percentile(d10, 99)) if d10.size else None,
             "max_dR@10": float(d10.max()) if d10.size else None,
@@ -144,8 +145,8 @@ def sweep_index(name, spec, knob_val, paths, sub, args):
             "region_hits": json.dumps(hits), "baseline_mode": baseline_mode,
             "aligned_worstcase": bool(args.aligned_worstcase), "seed": args.seed,
         })
-        log(f"          B={B:>7}: P(collapse)={rows[-1]['p_collapse']:.2f} "
-            f"crash={rows[-1]['n_crash']} hits={hits}")
+        log(f"          B={B:>7}: P(silent_collapse)={rows[-1]['p_silent_collapse']:.2f} "
+            f"crash={rows[-1]['n_crash']} nan_inf={rows[-1]['n_nan_inf']} hits={hits}")
     raw_fh.close()
     if n_harness:
         raise RuntimeError(f"{name}: {n_harness} harness-error record(s) (not corruption "

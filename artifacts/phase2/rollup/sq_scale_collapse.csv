@@ -1,0 +1,9 @@
+index,region,kind,bit_position_tag,n_samples,pct_collapse,mean_dRecall@10,max_dRecall@10,n_collapse,n_crash,n_nan_inf
+HNSW_SQ8,sq_scale,sq_scale,exponent,2048,25.0,0.22350556640625,0.9480999999999999,512,0,0
+HNSW_SQ8,sq_scale,sq_scale,mantissa-high,3840,0.0,0.002331041666666643,0.09770000000000001,0,0,0
+HNSW_SQ8,sq_scale,sq_scale,mantissa-low,2048,0.0,4.882812499994041e-08,9.999999999987796e-05,0,0,0
+HNSW_SQ8,sq_scale,sq_scale,sign,256,0.0,0.07949999999999997,0.3758999999999999,0,0,0
+IVF_SQ8,sq_scale,sq_scale,exponent,2048,56.15234375,0.5832034179687497,0.9484999999999999,1150,0,0
+IVF_SQ8,sq_scale,sq_scale,mantissa-high,3840,0.0,0.00639705729166659,0.13769999999999982,0,0,0
+IVF_SQ8,sq_scale,sq_scale,mantissa-low,2048,0.0,0.0,0.0,0,0,0
+IVF_SQ8,sq_scale,sq_scale,sign,256,13.671875,0.3616230468749999,0.6338999999999999,35,0,0

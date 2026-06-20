@@ -10,12 +10,15 @@ driven by the ABSOLUTE bit count of a critical structure, not a per-flip conditi
   Curve A — expected ΔRecall(r):   per index, Σ_region (region_bits · r) · E[ΔR@10 | flip].
             Bulk codes/vectors ≈ 0, centroid mild, the metadata tail rare-but-large. Linear
             superposition (valid while region_bits·r ≪ 1).
-  Curve B — P(catastrophic collapse)(r):  per index, 1 − Π_region (1 − p_fatal_region),
+  Curve B — P(collapse)(r):  per index, 1 − Π_region (1 − p_fatal_region),
             with p_fatal_region = 1 − exp(−cat_bits_region · r) and
-            cat_bits_region = catastrophic_fraction · region_bits. fp32 indexes (FLAT /
-            IVF_FLAT / HNSW) have no catastrophic single-bit structure ⇒ Curve B ≈ 0; SQ8 is
-            driven by `sq_scale`, PQ by `pq_codebook`. THIS is the "quantization introduces a
-            catastrophic single-point structure that fp32 lacks" main-axis plot data.
+            cat_bits_region = collapse_fraction · region_bits. collapse_fraction is the UNIFIED
+            retention rule (faulted@10 < frac*clean, silent-only; qp.metrics.is_silent_collapse),
+            supplied as `pct_collapse`. fp32 indexes (FLAT / IVF_FLAT / HNSW) have no single-bit
+            collapse structure ⇒ Curve B = 0; SQ8 is driven by `sq_scale`; PQ's `pq_codebook` is
+            distributed ⇒ 0. THIS is the "quantization introduces a single-point collapse
+            structure that fp32 lacks" main-axis plot data. (NB collapse is STRICTER than the
+            >0.01 HARMFUL bar used by Curve A — see qp.buckets.)
 
 Per-tag map rows are collapsed to per-region quantities by BIT-SHARE weighting the tags
 (fp32: sign 1, exponent 8, mantissa-high 15, mantissa-low 8 of 32; uint8 code bits equal;
@@ -122,7 +125,13 @@ def regions_from_tag_map(rows, rbits):
         for rc in recs:
             wt = w.get(rc["bit_position_tag"], 0.0)
             e_dr += wt * (_f(rc, "mean_dRecall@10", "mean_dR@10") or 0.0)
-            cat += wt * ((_f(rc, "pct_catastrophic") or 0.0) / 100.0)
+            # cat_frac is the COLLAPSE fraction (unified retention rule, qp.metrics.
+            # is_silent_collapse), supplied as pct_collapse by the NATIVE aggregators
+            # (phase1_sensitivity.aggregate / phase2_pq_sensitivity.aggregate_pq) — the single
+            # source. Regenerate maps via `phase1_sensitivity.py --aggregate-only` (and the Tier 1
+            # PQ run) rather than any side-channel recompute. Fall back to pct_catastrophic (the
+            # weaker >0.01 HARMFUL bar) only for old/smoke maps that predate the pct_collapse column.
+            cat += wt * ((_f(rc, "pct_collapse", "pct_catastrophic") or 0.0) / 100.0)
         rb = rbits.get((index, region))
         if rb is None:
             rb = _f(recs[0], "region_bits") or 0.0
@@ -137,7 +146,10 @@ def regions_from_tag_map(rows, rbits):
 
 def regions_from_graph_map(rows, rbits):
     """For the Tier 2 characterization: use the ALL-tag row. Crashes are DETECTABLE, so the
-    silent-collapse contribution to Curve B is pct_silent_harmful (not pct_crash)."""
+    collapse contribution to Curve B is the silent fraction (not pct_crash). graph_edges has
+    pct_silent_harmful = 0 (flips either crash or stay benign), and since collapse ⊆ harmful,
+    its silent-collapse fraction is 0 too; pct_silent_harmful is used as a conservative upper
+    bound for the cat_frac (it is 0 regardless, and graph_edges is its own series anyway)."""
     out = []
     for r in rows:
         if r.get("bit_position_tag") != "ALL":

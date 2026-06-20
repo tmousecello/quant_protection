@@ -218,19 +218,42 @@ python phase2_burst.py --aligned-worstcase --trials 50           # land on the c
 
 ---
 
-## What "collapse" / "catastrophic" mean (recap)
+## What "harmful" vs "collapse" mean (recap)
 
-| index family | baseline_mode | catastrophic rule |
-|---|---|---|
-| FLAT / IVF_FLAT / HNSW / IVF_SQ8 / HNSW_SQ8 | `aligned` | ΔR@10 > 0.01 (absolute) |
-| IVF_PQ_M8 / IVF_PQ_M16 | `own` | faulted recall@10 < 0.5 × own clean recall@10 |
+Two **distinct** severity tiers — keep them separate (conflating them is what made fp32 read as
+`p_collapse=1.0` under a large burst while Curve B said 0):
 
-Both the relative and absolute counts are stored in every Tier 1 row, so Tier 3 can choose.
+| tier | rule | applies to | used by |
+|---|---|---|---|
+| **harmful** | ΔR@10 > 0.01 (`buckets.HARMFUL_ABS`) | all families | single-bit sensitivity map, Curve A, detection guard |
+| **collapse** | faulted recall@10 < 0.5 × own clean (`config.COLLAPSE_RETENTION_FRAC`), **silent-only** | all families (unified) | headline Curve B + burst |
+
+`collapse ⊆ harmful` (a retention collapse has ΔR > ~0.475 ≫ 0.01). Collapse is **silent-only**:
+a crash / nan-inf is detectable and counted separately (`n_crash` / `n_nan_inf`), not as collapse.
+The single source of truth for the predicate is `qp.metrics.is_silent_collapse`.
+
+`pct_collapse` is emitted natively by the **sensitivity aggregators** (Phase 1
+`phase1_sensitivity.aggregate` + Tier 1 `phase2_pq_sensitivity.aggregate_pq`) in every
+sensitivity-map row, and is what Tier 3 reads for `cat_frac` — this is the **single source**.
+To (re)populate it on existing raw records without a full re-sweep, run
+`phase1_sensitivity.py --aggregate-only` (and re-aggregate the Tier 1 PQ run); both consume the
+saved `raw/*.records.jsonl` and recompute the maps. `sq_scale` is enumerated exhaustively by the
+native sweep, so no separate side-channel re-sweep is needed.
+
+> History: earlier this was a split — aligned indexes used absolute ΔR>0.01 and only PQ used
+> retention. That split called two different things "collapse"; it is superseded by the single
+> retention rule above. A throwaway `phase2_recompute_collapse.py` once back-filled `pct_collapse`
+> onto pre-column maps by re-sweeping only `sq_scale`; it has been **retired** in favour of the
+> native aggregators (its `collapse ⊆ harmful` guard keyed off `pct_catastrophic`, which also
+> counts crashes / harmful-but-non-collapse flips and so could false-abort). See
+> `phase2_fix_report_zh.md`.
 
 ## Files added by Phase 2
 
 - Scripts: `phase2_pq_sensitivity.py`, `phase2_graph_sensitivity.py`, `phase2_rollup.py`,
-  `phase2_detection.py`, `phase2_burst.py`.
+  `phase2_detection.py`, `phase2_burst.py`. (`pct_collapse` comes from the native sensitivity
+  aggregators — `phase1_sensitivity.py --aggregate-only` / the Tier 1 PQ run; the former
+  `phase2_recompute_collapse.py` back-fill shortcut has been retired.)
 - Library (additive): `qp/isolation.py` (subprocess crash isolation), `qp/flip.burst_flip` /
   `qp/flip.burst_positions`, and a `PHASE2_*` block in `qp/config.py`.
 - `artifacts/baseline.*` and the locked `qp/config.py` values are untouched. The byte-region

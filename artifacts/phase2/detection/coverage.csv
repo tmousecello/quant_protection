@@ -1,6 +1,6 @@
 index,region,severity,n,n_detected,coverage_pct
 HNSW_SQ8,sq_scale,benign,6084,66,1.0848126232741617
-HNSW_SQ8,sq_scale,catastrophic,1406,897,63.79800853485064
+HNSW_SQ8,sq_scale,harmful,1406,897,63.79800853485064
 HNSW_SQ8,sq_scale,moderate,702,21,2.9914529914529915
 IVF_FLAT,centroid,benign,1715,59,3.4402332361516037
 IVF_FLAT,centroid,moderate,285,280,98.24561403508773
@@ -15,5 +15,5 @@ IVF_PQ_M8,pq_codebook,moderate,667,503,75.41229385307346
 IVF_SQ8,centroid,benign,1613,41,2.541847489150651
 IVF_SQ8,centroid,moderate,387,298,77.00258397932816
 IVF_SQ8,sq_scale,benign,4174,18,0.43124101581217056
-IVF_SQ8,sq_scale,catastrophic,2983,1451,48.64230640295005
+IVF_SQ8,sq_scale,harmful,2983,1451,48.64230640295005
 IVF_SQ8,sq_scale,moderate,1035,15,1.4492753623188406

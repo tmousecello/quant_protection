@@ -127,6 +127,15 @@ def aggregate_pq(records, retention_frac):
         # Relative catastrophic for PQ: retention < frac of own clean. Crashes are total loss.
         n_cat_rel = sum(1 for r in recs if r.get("cat_rel")) + n_crash
         n_cat_abs = int((d10 > buckets.CATASTROPHIC_ABS).sum()) + n_crash
+        # COLLAPSE (silent-only retention): same retention rule but a crash / nan-inf is
+        # detectable, so it is NOT counted (unlike n_cat_rel). Routed through the single source
+        # of truth (metrics.is_silent_collapse) with failure_mode so nan-inf — which keeps a
+        # numeric faulted@10 and would otherwise pass the stored `cat_rel` flag — is excluded.
+        # Identical definition to the aligned indexes now -> one collapse notion overall.
+        n_collapse = sum(1 for r in recs
+                         if metrics.is_silent_collapse(r.get("faulted_recall@10"),
+                                                       r.get("clean_recall@10"),
+                                                       failure_mode=r.get("failure_mode")))
         n_ben = int((np.abs(d10) <= buckets.BENIGN_ABS).sum())
         if n > 1:
             h = float(stats.sem(d10)) * float(stats.t.ppf(0.975, n - 1))
@@ -146,6 +155,7 @@ def aggregate_pq(records, retention_frac):
             "pct_benign": 100.0 * n_ben / n_total if n_total else None,
             "pct_catastrophic": 100.0 * n_cat_rel / n_total if n_total else None,
             "pct_catastrophic_abs": 100.0 * n_cat_abs / n_total if n_total else None,
+            "pct_collapse": 100.0 * n_collapse / n_total if n_total else None,
             "ci95_low": (mean10 - h) if n else None,
             "ci95_high": (mean10 + h) if n else None,
             "n_silent_wrong": fm.count(metrics.SILENT_WRONG),

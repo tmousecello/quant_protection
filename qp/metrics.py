@@ -12,6 +12,41 @@ sees the clean path; Phase 1/2 import this for corrupted runs.
 """
 import numpy as np
 
+from qp import config
+
+
+# --- failure-mode classification ---------------------------------------------
+# (defined up here because is_silent_collapse needs CRASH / NAN_INF to enforce silent-only.)
+CLEAN = "clean"
+CRASH = "crash"
+NAN_INF = "nan-inf"
+SILENT_WRONG = "silent-wrong"
+
+
+def is_silent_collapse(faulted10, clean10, frac=None, failure_mode=None):
+    """Unified collapse predicate (all index families) — the single source of truth.
+
+    Collapse = the index lost at least `frac` of its usable recall: faulted recall@10 <
+    frac * own clean recall@10 (retention rule; frac defaults to config.COLLAPSE_RETENTION_FRAC).
+    This replaces the old aligned/own split (absolute >0.01 vs retention) that made fp32 read
+    as collapsing under a large burst while Curve B said it never collapses.
+
+    SILENT-only: a DETECTABLE failure is never a silent collapse, so this returns False for
+      - crash   -> faulted10 is None (and/or failure_mode == CRASH); and
+      - nan-inf -> failure_mode == NAN_INF.
+    NOTE: a nan-inf record still carries a NUMERIC faulted_recall@10, because recall is computed
+    from the returned ids even when the distances are non-finite (see classify_failure /
+    isolation._record / phase1 measure_flip). So the `faulted10 is None` check alone does NOT
+    exclude nan-inf — the caller MUST pass `failure_mode` from the flip record for the
+    silent-only guarantee. If `failure_mode` is omitted, only crashes are excluded (back-compat).
+    Callers count crash / nan-inf separately (n_crash / n_nan_inf).
+    """
+    if frac is None:
+        frac = config.COLLAPSE_RETENTION_FRAC
+    if failure_mode in (CRASH, NAN_INF):
+        return False
+    return faulted10 is not None and faulted10 < frac * clean10
+
 
 def recall_at_k(pred_ids, gt_ids, k):
     """Mean over queries of |set(pred_topk) ∩ set(true_topk)| / k.
@@ -63,13 +98,6 @@ def tolerant_recall(pred_ids, gt_ids, gt_dist, k, eps):
 def query_kth_gt_distance(gt_dist, k):
     """The kth true distance per query — handy for tolerant-recall diagnostics."""
     return np.asarray(gt_dist)[:, k - 1].copy()
-
-
-# --- failure-mode classification ---------------------------------------------
-CLEAN = "clean"
-CRASH = "crash"
-NAN_INF = "nan-inf"
-SILENT_WRONG = "silent-wrong"
 
 
 def classify_failure(exception=None, distances=None, indices=None,

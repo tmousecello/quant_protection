@@ -241,3 +241,74 @@ def serialized_region_map(header, file_size=None):
         "total_bytes": file_size,
         "regions": regions,
     }
+
+
+# --- per-element addressing + cost aggregation (Stage 1) ----------------------
+
+# Per-vector kinds (one block PER element) vs global kinds (one copy for the whole index). Used
+# both to address element e>0 and to scale per-vector structures by cur_element_count for cost.
+PER_VECTOR_FIELDS = ("links", "cluster_id", "label",
+                     "bin_code", "bin_factors", "ex_code", "ex_factors")
+GLOBAL_FIELDS = ("header", "centroids", "rotation")
+
+
+def base_name(name):
+    """Strip the 'elem0.' element-0 prefix the region map uses for per-vector regions.
+
+    Single source of truth for the prefix minted by serialized_region_map; bitclass and the
+    stub adapter route through this so the delimiter lives in exactly one place.
+    """
+    return name.split(".", 1)[1] if name.startswith("elem0.") else name
+
+
+def element_field_range(rmap, field, e):
+    """Absolute (byte_start, byte_len) of per-vector `field` for element index `e`.
+
+    The region map (serialized_region_map) exposes per-element sub-regions for ELEMENT 0 only
+    (`elem0.<field>`). Element e's block is exactly e*size_data_per_element bytes later, so we add
+    that to the already-correct elem0 byte_start rather than recomputing level0_start by hand
+    (which would risk double-adding the 156-B header or the centroids block). Raises if `field`
+    is absent (e.g. ex_* on a b=1 index) or `e` strays outside level0.
+    """
+    name = f"elem0.{field}"
+    r = next((x for x in rmap["regions"] if x["name"] == name), None)
+    if r is None:
+        raise KeyError(f"no per-element region {name!r} in map (fields: "
+                       f"{[x['name'] for x in rmap['regions'] if x['name'].startswith('elem0.')]})")
+    hdr = rmap["header"]
+    n = hdr["cur_element_count"]
+    spe = hdr["size_data_per_element"]
+    if not (0 <= int(e) < n):
+        raise IndexError(f"element {e} out of range [0,{n})")
+    byte_start = r["byte_start"] + int(e) * spe
+    level0 = next(x for x in rmap["regions"] if x["name"] == "level0")
+    level0_end = level0["byte_start"] + level0["byte_len"]
+    if byte_start + r["byte_len"] > level0_end:
+        raise IndexError(f"element {e} {field} [{byte_start},{byte_start + r['byte_len']}) "
+                         f"overruns level0 end {level0_end}")
+    return byte_start, r["byte_len"]
+
+
+def aggregate_region_map(rmap):
+    """Region map for COST accounting: per-vector structures priced for ALL elements.
+
+    serialized_region_map's `elem0.<field>` is a single element's slice, so feeding it to
+    phase3_cost.mem_cost prices one of ~10^6 vectors (Stage 0 known-limitation). Here each
+    per-vector field's byte_len is multiplied by cur_element_count; global structures
+    (header/centroids/rotation) are kept at face value. The output keys match what mem_cost reads
+    ({'regions':[{name,byte_len}...]}), so phase3_cost stays untouched.
+    """
+    n = rmap["header"]["cur_element_count"]
+    out = []
+    for r in rmap["regions"]:
+        bn = r["name"]
+        base = base_name(bn)
+        if base in PER_VECTOR_FIELDS and bn.startswith("elem0."):
+            out.append({"name": base, "kind": r["kind"],
+                        "byte_len": int(r["byte_len"]) * int(n),
+                        "n_elements": int(n), "per_vector": True})
+        elif bn in GLOBAL_FIELDS:
+            out.append({"name": bn, "kind": r["kind"], "byte_len": int(r["byte_len"]),
+                        "n_elements": 1, "per_vector": False})
+        # level0 / upper_links are containers already covered by their per-element fields; skip.
+    return {"index": rmap["index"], "header": rmap["header"], "regions": out}

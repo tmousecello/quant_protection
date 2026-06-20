@@ -149,7 +149,8 @@ def clean_baseline_recall(index_path=None):
     return max(table.values())
 
 
-def query_ids(index_path=None, k=None, ef=2000, out_path=None, query_f=None, gt_f=None):
+def query_ids(index_path=None, k=None, ef=2000, out_path=None, query_f=None, gt_f=None,
+              timeout=None):
     """Per-query top-k neighbour ids from the real search path, plus the C++-side recall.
 
     Runs the exp_dumpids instrument (built by build_rabitq.sh) at a single `ef`, which writes
@@ -158,6 +159,8 @@ def query_ids(index_path=None, k=None, ef=2000, out_path=None, query_f=None, gt_
       cpp_recall : the binary's recall@k on those same ids — the parity counterpart to
                    qp.metrics.recall_at_k(ids, gt, k).
     `ef` defaults high (2000) to sit on the recall plateau (~0.983). Gated on the x86-64 build.
+    `timeout` (seconds) bounds the subprocess: a corrupted index that hangs the search raises
+    subprocess.TimeoutExpired (the sweep maps that to a `crash`). None = no limit.
     """
     _require_binaries()
     k = config.K if k is None else int(k)
@@ -167,7 +170,7 @@ def query_ids(index_path=None, k=None, ef=2000, out_path=None, query_f=None, gt_
     out_path = out_path or os.path.join(PREP, f"_dumpids_ef{int(ef)}_k{k}.ivecs")
     cmd = [os.path.join(BIN, "exp_dumpids"), index_path, query_f, gt_f, METRIC,
            str(int(ef)), out_path, str(k)]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
     cpp_recall = None
     for line in res.stdout.splitlines():
         parts = line.strip().split("\t")
@@ -177,3 +180,25 @@ def query_ids(index_path=None, k=None, ef=2000, out_path=None, query_f=None, gt_
         raise RuntimeError(f"exp_dumpids did not print a RECALL line; stdout:\n{res.stdout}")
     ids = read_ivecs(out_path)
     return ids, cpp_recall
+
+
+def search_corrupted(index_path, k=None, ef=2000, out_path=None, query_f=None, gt_f=None,
+                     timeout=None):
+    """Runner contract: search a (possibly corrupted) index file, return ids/recall/distances.
+
+    Returns a dict {"ids", "cpp_recall", "distances"}. `distances` is the per-query top-k distance
+    array (nq, k) when exp_dumpids emitted a companion `<out_path>.dist.fvecs` (the workstation
+    build adds this; see E1_RUNBOOK.md), else None — the runner's failure classifier then runs the
+    SAME qp.metrics.classify_failure path FAISS uses, degrading gracefully (no nan-inf detection)
+    when distances are absent. Subprocess crash/timeout propagate as CalledProcessError /
+    TimeoutExpired for the sweep to record as `crash`.
+    """
+    k = config.K if k is None else int(k)
+    out_path = out_path or os.path.join(PREP, f"_dumpids_ef{int(ef)}_k{k}.ivecs")
+    ids, cpp_recall = query_ids(index_path, k=k, ef=ef, out_path=out_path,
+                                query_f=query_f, gt_f=gt_f, timeout=timeout)
+    distances = None
+    dist_path = out_path + ".dist.fvecs"
+    if os.path.isfile(dist_path):
+        distances = read_fvecs(dist_path)[0]
+    return {"ids": ids, "cpp_recall": cpp_recall, "distances": distances}

@@ -66,6 +66,27 @@ and runs the full suite (parity included) + the live ≈0.983 baseline gate.
   pass an element count into `mem_cost` before any per-vector protection budget is trusted.
   The cost formulas themselves are correct for the region map they are given.
 
+## Stage 1 update (E1 + E3a/E3b built; stub-green, awaiting x86 run)
+
+Built on top of Stage 0 (see `plan/stage1_plan.md` and `E1_RUNBOOK.md`):
+- **Adapter injection** — `qp/rabitq/registry.py::get_adapter` + `qp/rabitq/stub_adapter.py`
+  (deterministic synthetic-index adapter). `--adapter {stub,real,auto}` switches with no code
+  change; `real` without binaries report-and-stops (never downgrades to stub).
+- **Bit-class** — `qp/rabitq/bitclass.py`, derived from source: rotation = 4 FhtKac sign-flip
+  stages (`rot_stage0..3`); bin/ex factors = float fields × fp32 tag (f_error marked); bin_code =
+  flat sign; pointers = int32 high/low lane; **ex_code = flat (report-and-stop**: SIMD
+  bit-plane packing has no contiguous high/low split).
+- **Runners** — `phase3_e1_vuln.py` (single-bit map; rotation exhaustive, per-vector sampled with
+  bootstrap CI; reuses `phase1_sensitivity.aggregate` + the unified `is_silent_collapse`; emits
+  `vuln_map` + criticality order + three-tier scrub allocation priced via `phase3_cost`),
+  `phase3_e3a_additivity.py`, `phase3_e3b_spatial.py`.
+- **Resolves the two Stage-0 deferrals below**: per-vector addressing via
+  `layout.element_field_range` and per-vector cost via `layout.aggregate_region_map`
+  (×`cur_element_count`); nan-inf via the distances-optional `adapter.search_corrupted`
+  (runbook §2 extends `exp_dumpids` to dump distances on the workstation).
+- Tests: `tests/test_e1_rabitq_stage1.py` + `tests/test_e1_runners.py` (full suite now **64
+  passed, 1 skipped**). Scientific numbers pending the x86 run (E1_RUNBOOK).
+
 ## To finish Stage 0 acceptance on the right machine
 1. `bash build_rabitq.sh` on an x86-64 Linux host (cmake + libomp present) → binaries + b=7 index.
 2. Confirm `adapter.clean_baseline_recall()` ≈ 0.983 (anchors the whole study).

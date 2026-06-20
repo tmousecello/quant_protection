@@ -14,4 +14,8 @@ Live measurement (clean baseline ~0.983, parity) requires the C++ binaries, whic
 ONLY on x86-64 (the library is AVX2/AVX512-only). On Apple Silicon the layout is still fully
 readable/derivable from source; the binaries are produced by running build_rabitq.sh on an
 x86-64 Linux host.
+
+For Phase 3 Stage 1 the runners select their adapter through `get_adapter` (registry.py): the
+live `adapter` on x86, a deterministic `stub_adapter` on arm64 — same interface, no code change.
 """
+from qp.rabitq.registry import get_adapter, adapter_name   # noqa: E402,F401

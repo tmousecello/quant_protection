@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quant-protection-qp"
+version = "0.0.0"
+description = "qp measurement core (recall / collapse / fault injection) — single source of truth for the quant_protection study and Phase 3 RaBitQ work."
+requires-python = ">=3.13"
+# faiss is intentionally NOT declared here: the pure metric/fault modules (qp.metrics,
+# qp.config, qp.bits, qp.faults) import faiss-free, and faiss-cpu is provided by the env
+# (requirements.txt). Declaring it would force a heavy dep on faiss-free importers.
+
+[tool.setuptools]
+packages = ["qp", "qp.rabitq"]
+# Phase 3 wrappers live at repo root (phase2_*.py convention) but are imported by the golden
+# generator and tests, so expose them as importable top-level modules too.
+py-modules = ["phase3_recall", "phase3_cost"]

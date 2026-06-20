@@ -14,7 +14,9 @@ faiss-cpu==1.14.2
 hnswlib
 
 # 載入 fvecs/ivecs、直接翻 bit
-numpy
+# 釘版：golden_smoke.json 內含 numpy Generator (binomial/choice/integers) 的取樣輸出，
+# 跨版本不保證穩定（只有 PCG64 bitstream 保證）；釘住測試過的版本以免 golden 偽退化。
+numpy==2.4.6
 
 # 95% CI、single-bit recall-drop 分布統計 (mean/p99/max, %benign/%catastrophic)
 scipy
@@ -27,3 +29,6 @@ matplotlib
 
 # 30–100 次隨機 fault 放置的進度條
 tqdm
+
+# Phase 3 Stage 0 元件驗證 (fault model / recall / cost / golden / parity 單元測試)
+pytest

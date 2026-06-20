@@ -1,0 +1,82 @@
+{
+  "collapse": {
+    "nan_inf_excluded": false,
+    "silent_false": false,
+    "silent_true": true
+  },
+  "cross_row": {
+    "checksum": 940,
+    "count": 2,
+    "first5": [
+      214,
+      726
+    ]
+  },
+  "cumulative_curve": [
+    0,
+    0,
+    0,
+    50,
+    50,
+    50
+  ],
+  "layout": {
+    "bin_data_bytes": 28,
+    "element_region_lens": {
+      "bin_code": 16,
+      "bin_factors": 12,
+      "cluster_id": 4,
+      "ex_code": 96,
+      "ex_factors": 8,
+      "label": 4,
+      "links": 132
+    },
+    "ex_data_bytes": 104,
+    "header_bytes": 156,
+    "rotation_bytes": 64,
+    "size_links_level0": 132
+  },
+  "mem_cost": {
+    "checksum_bytes": 4,
+    "replication_bytes": 140,
+    "total_bytes": 144
+  },
+  "recall_block": {
+    "recall@1": 1.0,
+    "recall@10": 0.7,
+    "tolerant_recall@10": 0.7
+  },
+  "spatial_cluster": {
+    "checksum": 809319,
+    "count": 60,
+    "first5": [
+      34,
+      38,
+      39,
+      737,
+      741
+    ]
+  },
+  "temporal_burst": {
+    "checksum": 188541,
+    "count": 12,
+    "first5": [
+      3011,
+      3580,
+      8569,
+      9778,
+      10972
+    ]
+  },
+  "uniform_p": {
+    "checksum": 293948,
+    "count": 19,
+    "first5": [
+      172,
+      1818,
+      3901,
+      4305,
+      8351
+    ]
+  }
+}

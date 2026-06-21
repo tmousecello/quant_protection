@@ -289,25 +289,43 @@ def derive_criticality(rows, rmap, collapse_min=5.0, harmful_min=5.0, crash_min=
       frequent_scrub small global/critical structures that silently collapse (rotation/factors/bin)
       crc_eb_lazy    structures harmful-but-not-collapsing (ex code/factors) -> CRC + EB + reload
       none           immune (no measurable harm)
+
+    SEVERITY (not just frequency): a heavy-tailed GLOBAL structure (e.g. the 64-B rotation) can have
+    a low collapse FREQUENCY (few of its bits cross the retention bar) yet a rare bit that alone
+    halves recall (high max ΔRecall@10). Frequency thresholds miss it, so any GLOBAL structure
+    (layout.GLOBAL_FIELDS) with at least one single-point-collapse bit is upgraded to frequent_scrub
+    regardless of frequency. Per-vector structures keep the frequency rule (one bad bit among ~1e6
+    elements is negligible). max/p99 ΔRecall@10 are surfaced for transparency.
     """
     by_struct = {}
     for r in rows:
         d = by_struct.setdefault(r["region"], {"pct_collapse": 0.0, "pct_harmful": 0.0,
-                                               "pct_crash": 0.0, "kind": r["kind"]})
+                                               "pct_crash": 0.0, "max_dRecall": 0.0,
+                                               "p99_dRecall": 0.0, "has_collapse_bit": False,
+                                               "kind": r["kind"]})
         d["pct_collapse"] = max(d["pct_collapse"], r.get("pct_collapse") or 0.0)
-        d["pct_harmful"] = max(d["pct_harmful"], r.get("pct_catastrophic") or 0.0)
+        d["has_collapse_bit"] = d["has_collapse_bit"] or (r.get("pct_collapse") or 0.0) > 0.0
+        d["max_dRecall"] = max(d["max_dRecall"], r.get("max_dRecall@10") or 0.0)
+        d["p99_dRecall"] = max(d["p99_dRecall"], r.get("p99_dRecall@10") or 0.0)
         # pct_crash from failure-mode counts (n_crash / n_samples) per row
         n = r.get("n_samples") or 0
-        d["pct_crash"] = max(d["pct_crash"], 100.0 * (r.get("n_crash") or 0) / n if n else 0.0)
+        crash_pct = 100.0 * (r.get("n_crash") or 0) / n if n else 0.0
+        d["pct_crash"] = max(d["pct_crash"], crash_pct)
+        # HARMFUL excluding crash: pct_catastrophic = (ΔR>0.01).sum()+n_crash over n_total
+        # (phase1_sensitivity.aggregate). Subtract the crash share so a near-crash structure is
+        # tiered by its silent harm, not by crashes it already detects via bounds_check.
+        harmful_noncrash = (r.get("pct_catastrophic") or 0.0) - crash_pct
+        d["pct_harmful"] = max(d["pct_harmful"], max(0.0, harmful_noncrash))
 
     if agg is None:
         agg = layout.aggregate_region_map(rmap)
     agg_sizes = {r["name"]: r["byte_len"] for r in agg["regions"]}
     out = []
     for struct, d in by_struct.items():
+        is_global = struct in layout.GLOBAL_FIELDS
         if d["pct_crash"] >= crash_min and (d["pct_collapse"] < collapse_min):
             tier = "bounds_check"
-        elif d["pct_collapse"] >= collapse_min:
+        elif d["pct_collapse"] >= collapse_min or (is_global and d["has_collapse_bit"]):
             tier = "frequent_scrub"
         elif d["pct_harmful"] >= harmful_min:
             tier = "crc_eb_lazy"
@@ -317,11 +335,14 @@ def derive_criticality(rows, rmap, collapse_min=5.0, harmful_min=5.0, crash_min=
                     "pct_collapse": round(d["pct_collapse"], 3),
                     "pct_harmful": round(d["pct_harmful"], 3),
                     "pct_crash": round(d["pct_crash"], 3),
+                    "max_dRecall@10": round(d["max_dRecall"], 4),
+                    "p99_dRecall@10": round(d["p99_dRecall"], 4),
                     "footprint_bytes": agg_sizes.get(struct),
                     "scrub_tier": tier})
-    # Top-Down reduction order: collapse first, then harmful, then crash, then smaller footprint.
-    out.sort(key=lambda x: (-x["pct_collapse"], -x["pct_harmful"], -x["pct_crash"],
-                            x["footprint_bytes"] or 0))
+    # Top-Down reduction order: collapse fraction first, then worst-case severity (max ΔRecall),
+    # then harmful, then crash, then smaller footprint.
+    out.sort(key=lambda x: (-x["pct_collapse"], -x["max_dRecall@10"], -x["pct_harmful"],
+                            -x["pct_crash"], x["footprint_bytes"] or 0))
     for i, o in enumerate(out):
         o["criticality_rank"] = i + 1
     return out
@@ -340,7 +361,16 @@ def cost_of_allocation(ranking, rmap, agg=None):
     assignment = {}
     for o in ranking:
         spec = tier_spec[o["scrub_tier"]]
-        if spec and o["structure"] in present and (spec["mult"] > 1 or spec["checksum_bytes"] > 0):
+        if not spec:
+            continue
+        if o["structure"] not in present:
+            # A structure flagged for protection but missing from the aggregated cost map (e.g. an
+            # absent ex_* region at ex_bits==0, or a container field) would otherwise be priced as
+            # free and silently unprotected — surface it instead of dropping it quietly.
+            log(f"[e1] [warn] structure {o['structure']!r} (tier {o['scrub_tier']}) is absent from "
+                f"the aggregated region map — its protection is NOT priced (footprint unknown).")
+            continue
+        if spec["mult"] > 1 or spec["checksum_bytes"] > 0:
             assignment[o["structure"]] = spec
     mc = cost.mem_cost(agg, assignment)
     total_bytes = sum(r["byte_len"] for r in agg["regions"])

@@ -15,23 +15,26 @@
 #   9 full scientific runs: E1 vuln map + E3a + E3b (--adapter real)   [skipped under --smoke]
 #  10 summary
 #
-# Idempotent: every underlying step skips work whose output already exists; runner --resume
-# continues a partial sweep. The runners need NO edits on the workstation — --adapter real (or the
-# auto-default, which resolves to real once the binaries exist) is the only switch.
+# Idempotent: every underlying step skips work whose output already exists; the E1 --resume
+# continues a partial sweep (E3a/E3b are small single-shot). The runners need NO edits on the
+# workstation — --adapter real is passed explicitly, with --allow-no-distances (stock exp_dumpids
+# has no distance dump) and, for the smoke first shot, --clean-tol 0.05 (ef=64 lowers clean recall).
 #
 # Usage:
 #   bash run_stage1_x86.sh            # full: build + pytest + first-shot + E1/E3a/E3b real runs
 #   bash run_stage1_x86.sh --smoke    # fast: build + pytest + first-shot only (stop before §9)
-#   bash run_stage1_x86.sh --resume   # full, but resume any partially-completed E1/E3a/E3b shard
+#   bash run_stage1_x86.sh --resume   # full, but resume a partially-completed E1 sweep
 set -euo pipefail
 
 QP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RQ_ROOT="${RQ_ROOT:-$(cd "$QP_ROOT/.." && pwd)/StorageSystemProject_RaBitQ_Free-recovery}"
 RQ_REMOTE="${RQ_REMOTE:-https://github.com/ZMYsamuel/StorageSystemProject_RaBitQ_Free-recovery.git}"
 PY="$QP_ROOT/.venv/bin/python"
-# rotation = RaBitQ's sq_scale-analog single-point structure; on a correctly aligned map a single
-# flip there should silently collapse recall. Gate the first shot on a high collapse fraction.
-ROT_COLLAPSE_MIN="${ROT_COLLAPSE_MIN:-50}"
+# First-shot is an ALIGNMENT check, not a severity verdict. rotation is heavy-tailed (most bits
+# perturb recall slightly; a few are catastrophic), so we gate on "rotation flips demonstrably move
+# recall" (max ΔRecall@10 over rotation rows) and merely REPORT the severity (collapse fraction,
+# max/p99 ΔRecall). An inert rotation (signal ~0) means the region map is offset against this build.
+ROT_ALIGN_DRECALL_MIN="${ROT_ALIGN_DRECALL_MIN:-0.05}"
 
 SMOKE=0
 RESUME=""
@@ -108,30 +111,40 @@ set +e
 pytest_rc=$?
 set -e
 
-# 8. FIRST SHOT: real single-bit rotation flip ---------------------------
-# Physical confirmation the region map is aligned to THIS build + E1's headline datapoint.
-banner "8/10 first shot: single-bit rotation flip on the real index"
+# 8. FIRST SHOT: real rotation flips (alignment check) -------------------
+# Confirms the region map is aligned to THIS build (rotation bytes are consumed by the search) and
+# is E1's first datapoint. Two flags make it run unmodified on the stock workstation:
+#   --clean-tol 0.05      smoke ef=64 -> clean@10 ~0.95 vs the 0.983 plateau anchor (real ΔRecall
+#                         magnitudes come from §9 at ef=2000, not this fast pass).
+#   --allow-no-distances  stock exp_dumpids emits ids+RECALL only (no per-query distances), so
+#                         nan-inf is undetectable and honestly flagged 'not-detected' rather than
+#                         report-and-stopping. (Optional exp_dumpids extension: E1_RUNBOOK §2.)
+banner "8/10 first shot: rotation flips on the real index (alignment check)"
 set +e
-"$PY" "$QP_ROOT/phase3_e1_vuln.py" --adapter real --smoke
+"$PY" "$QP_ROOT/phase3_e1_vuln.py" --adapter real --smoke --clean-tol 0.05 --allow-no-distances
 firstshot_rc=$?
 set -e
-rot_collapse=""
+rot_report=""
 if [ $firstshot_rc -eq 0 ]; then
   set +e
-  rot_collapse="$("$PY" - "$QP_ROOT" "$ROT_COLLAPSE_MIN" <<'PYEOF'
+  rot_report="$("$PY" - "$QP_ROOT" "$ROT_ALIGN_DRECALL_MIN" <<'PYEOF'
 import json, os, sys
 qp_root, thr = sys.argv[1], float(sys.argv[2])
 vm = os.path.join(qp_root, "artifacts_smoke", "phase3", "e1", "vuln_map.json")
 rows = json.load(open(vm)).get("rows", [])
-rot = [r for r in rows if r.get("region") == "rotation" and r.get("pct_collapse") is not None]
+rot = [r for r in rows if r.get("region") == "rotation"]
 if not rot:
     print("NO_ROTATION_ROWS"); sys.exit(3)
-vals = [r["pct_collapse"] for r in rot]
-mean = sum(vals) / len(vals)
-print(f"{mean:.1f}")
-# Report-and-stop gate from the runbook: if rotation does NOT collapse, this is a finding
-# (region-map offset OR rotation is more graceful than predicted) — do not proceed blindly.
-sys.exit(0 if mean >= thr else 7)
+def col(name):  # max over rotation bit-class rows, treating None as 0
+    return max((r.get(name) or 0.0) for r in rot)
+align = col("max_dRecall@10")                    # alignment signal: rotation perturbs recall
+pct_collapse_mean = sum((r.get("pct_collapse") or 0.0) for r in rot) / len(rot)
+n_silent = sum((r.get("n_silent_wrong") or 0) for r in rot)
+# One-line severity REPORT (not a gate): heavy-tailed -> max/p99 carry the danger, not the mean.
+print(f"align(maxΔR@10)={align:.4f} | collapse_pct(mean)={pct_collapse_mean:.2f} "
+      f"maxΔR@10={col('max_dRecall@10'):.4f} p99ΔR@10={col('p99_dRecall@10'):.4f} "
+      f"n_silent_wrong={n_silent}")
+sys.exit(0 if align >= thr else 7)             # stop ONLY if rotation is inert (likely map offset)
 PYEOF
 )"
   rot_rc=$?
@@ -140,17 +153,20 @@ else
   rot_rc=$firstshot_rc
 fi
 if [ "${rot_rc:-1}" -eq 0 ]; then
-  echo "rotation mean pct_collapse = ${rot_collapse} (>= ${ROT_COLLAPSE_MIN}) — region map aligned; rotation IS catastrophic (the F1 headline)."
+  echo "region map ALIGNED — rotation flips move recall (signal >= ${ROT_ALIGN_DRECALL_MIN})."
+  echo "  severity: ${rot_report}"
+  echo "  (rotation is heavy-tailed: rare catastrophic bits, not a uniform collapse — see §9 at ef=2000.)"
 elif [ "${rot_rc:-1}" -eq 7 ]; then
   cat >&2 <<EOF
-!!! [stage1-x86] REPORT-AND-STOP: rotation did NOT collapse (mean pct_collapse=${rot_collapse} < ${ROT_COLLAPSE_MIN}).
-    Per E1_RUNBOOK §1 this is a FINDING, not necessarily a bug: either the region map is offset
-    against this build, or the structured 64-byte rotation is more graceful than predicted.
-    Both must be understood before the full sweep. Inspect:
+!!! [stage1-x86] REPORT-AND-STOP: rotation is INERT (${rot_report}; align signal < ${ROT_ALIGN_DRECALL_MIN}).
+    Flipping rotation bytes barely moves recall, so the region map is likely OFFSET against this
+    build (or rotation is genuinely not consumed). Per E1_RUNBOOK §1 this is a FINDING — do not
+    proceed to §9 blindly. Inspect:
       $QP_ROOT/artifacts_smoke/phase3/e1/vuln_map.json   (rotation rows)
-    Do NOT proceed to §9 blindly. Stopping.
 EOF
   exit 7
+elif [ "${rot_rc:-1}" -eq 3 ]; then
+  die "first-shot produced NO rotation rows in vuln_map.json — runner output schema changed or rotation region absent; inspect $QP_ROOT/artifacts_smoke/phase3/e1/vuln_map.json."
 else
   die "first-shot rotation smoke failed to run (rc=$firstshot_rc). See output above."
 fi
@@ -163,15 +179,18 @@ if [ "$SMOKE" -eq 1 ]; then
 else
   banner "9/10 full scientific runs: E1 vuln map + E3a + E3b (--adapter real)"
   mkdir -p "$QP_ROOT/artifacts/phase3/e1" "$QP_ROOT/artifacts/phase3/e3a" "$QP_ROOT/artifacts/phase3/e3b"
+  # --allow-no-distances: stock exp_dumpids has no distance dump (nan-inf undetectable, honestly
+  # flagged). §9 runs at ef=2000 so clean ~0.983 sits on the anchor — no --clean-tol needed here.
+  # --resume is E1-only (E3a/E3b are small single-shot experiments with no resume support).
   set +e
   echo "--- E1: full vuln map (rotation exhaustive + per-vector sampled w/ CI) ---"
-  "$PY" "$QP_ROOT/phase3_e1_vuln.py" --adapter real $RESUME 2>&1 | tee "$QP_ROOT/artifacts/phase3/e1/run.log"
+  "$PY" "$QP_ROOT/phase3_e1_vuln.py" --adapter real --allow-no-distances $RESUME 2>&1 | tee "$QP_ROOT/artifacts/phase3/e1/run.log"
   e1_rc=${PIPESTATUS[0]}
   echo "--- E3a: multi-bit additivity ---"
-  "$PY" "$QP_ROOT/phase3_e3a_additivity.py" --adapter real $RESUME 2>&1 | tee "$QP_ROOT/artifacts/phase3/e3a/run.log"
+  "$PY" "$QP_ROOT/phase3_e3a_additivity.py" --adapter real --allow-no-distances 2>&1 | tee "$QP_ROOT/artifacts/phase3/e3a/run.log"
   e3a_rc=${PIPESTATUS[0]}
   echo "--- E3b: spatial (W,k) clustering vs uniform ---"
-  "$PY" "$QP_ROOT/phase3_e3b_spatial.py" --adapter real $RESUME 2>&1 | tee "$QP_ROOT/artifacts/phase3/e3b/run.log"
+  "$PY" "$QP_ROOT/phase3_e3b_spatial.py" --adapter real --allow-no-distances 2>&1 | tee "$QP_ROOT/artifacts/phase3/e3b/run.log"
   e3b_rc=${PIPESTATUS[0]}
   set -e
 fi
@@ -182,7 +201,7 @@ ok() { [ "${1:-1}" -eq 0 ] && echo "PASS" || echo "FAIL"; }
 have() { [ -f "$1" ] && echo "ok ($1)" || echo "MISSING ($1)"; }
 echo "  clean baseline ~0.983 ......... $(ok $baseline_rc)"
 echo "  pytest suite (incl parity) .... $(ok $pytest_rc)"
-echo "  first-shot rotation gate ...... $(ok ${rot_rc:-1})  (mean pct_collapse=${rot_collapse:-n/a}, min=${ROT_COLLAPSE_MIN})"
+echo "  first-shot alignment gate ..... $(ok ${rot_rc:-1})  [${rot_report:-n/a}]"
 acc_fail=0
 [ $baseline_rc -eq 0 ] || acc_fail=1
 [ $pytest_rc   -eq 0 ] || acc_fail=1

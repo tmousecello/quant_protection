@@ -14,18 +14,27 @@ auto-default, which picks `real` once the binaries exist).
    `exp_dumpids`. Confirm: `python -c "from qp.rabitq import adapter; print(adapter.binaries_built())"`
    → `True`, and `adapter.clean_baseline_recall()` ≈ **0.983** (anchors the whole study).
 
-## 1. First shot — is the 64-byte rotation catastrophic?
-Before the full sweep, flip a single bit of the **rotation** region and look at recall. This is
-both (a) a physical confirmation that the region map is aligned to the real file and (b) E1's first
-datapoint (the headline hypothesis: rotation = RaBitQ's `sq_scale` single-point catastrophe).
+## 1. First shot — is the region map aligned, and how dangerous is the 64-byte rotation?
+Before the full sweep, flip rotation bits and look at recall. This is both (a) a physical
+confirmation that the region map is aligned to the real file and (b) E1's first datapoint.
 
 ```bash
-python phase3_e1_vuln.py --adapter real --smoke    # tiny budget; rotation is enumerated first
+python phase3_e1_vuln.py --adapter real --smoke --clean-tol 0.05   # smoke ef=64 -> clean ~0.95
 ```
-Inspect `artifacts_smoke/phase3/e1/vuln_map.json`: the `rotation` rows should show
-`pct_collapse` near 100 (silent collapse: finite-but-wrong distances, not nan-inf/crash). **If
-recall does NOT collapse, STOP and report** — either the region map is offset against this build, or
-the structured rotation is more graceful than predicted. Both are findings; do not proceed blindly.
+The gate (in `run_stage1_x86.sh` step 8) is an **alignment** check: it passes iff rotation flips
+demonstrably move recall — `max ΔRecall@10` over the rotation rows ≥ `ROT_ALIGN_DRECALL_MIN`
+(default 0.05). It does **not** gate on a collapse fraction. **Report-and-stop (exit 7) only when
+rotation is inert** (signal ≈ 0) → the region map is likely offset against this build; inspect
+`artifacts_smoke/phase3/e1/vuln_map.json` (rotation rows).
+
+Observed on the x86 workstation: rotation is **aligned but heavy-tailed** — the map is correct
+(header/links/cluster_id flips crash, centroids move recall, all 512 rotation flips register as
+`silent_wrong`), yet only ~0.2 % of rotation bits cross the 50 %-retention collapse bar while the
+worst single bit drops recall@10 by ~0.5. So rotation is **not** a `sq_scale`-style uniform
+single-point catastrophe; its danger lives in the tail (`max`/`p99 ΔRecall@10`), which the runner
+reports and `derive_criticality` now uses to upgrade rotation (a GLOBAL structure with ≥1
+single-point-collapse bit) to `frequent_scrub`. Note: first-shot magnitudes are at smoke ef=64; the
+full §3 run at ef=2000 gives the operating-point numbers.
 
 ## 2. (Recommended) enable nan-inf detection — extend exp_dumpids
 The failure taxonomy separates silent / **nan-inf** / crash. `exp_dumpids` currently emits ids +

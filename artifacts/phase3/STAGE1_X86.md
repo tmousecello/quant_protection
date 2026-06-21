@@ -56,8 +56,8 @@ sudo apt-get update && sudo apt-get install -y git cmake build-essential python3
 | 5 build | `build_rabitq.sh` → clone/pin RaBitQ-Library@`7e39df2`, patch, build all binaries incl `exp_dumpids`, prepare SIFT, build the b=7 index |
 | 6 adapter | `adapter.binaries_built()` → True, `adapter.clean_baseline_recall()` ≈ 0.983 (anchors the study) |
 | 7 pytest | full suite (**parity keystone now runs**: `qp.metrics` recall on the real top-k ids must equal the C++'s own recall, ≈0.983) |
-| 8 first shot | single-bit **rotation** flip on the real index via `phase3_e1_vuln.py --adapter real --smoke`; gate on mean `pct_collapse` ≥ `ROT_COLLAPSE_MIN` (default 50) |
-| 9 full runs | `phase3_e1_vuln.py` / `e3a` / `e3b` with `--adapter real`, tee'd to per-experiment `run.log` *(skipped under `--smoke`)* |
+| 8 first shot | **rotation** flips on the real index via `phase3_e1_vuln.py --adapter real --smoke --clean-tol 0.05 --allow-no-distances`; **alignment** gate: pass iff rotation flips move recall (`max ΔRecall@10` ≥ `ROT_ALIGN_DRECALL_MIN`, default 0.05) — severity (collapse %, max/p99 ΔRecall) is **reported, not gated** |
+| 9 full runs | `phase3_e1_vuln.py` / `e3a` / `e3b` with `--adapter real --allow-no-distances`, tee'd to per-experiment `run.log` *(skipped under `--smoke`; `--resume` applies to E1 only)* |
 | 10 summary | PASS/FAIL per item + output-file presence + artifact paths |
 
 Everything is idempotent: re-running skips cached clone/build/index/dataset steps. The runners'
@@ -71,13 +71,15 @@ Everything is idempotent: re-running skips cached clone/build/index/dataset step
    laptop. On x86 the **parity** test runs for real: `exp_dumpids` executes the real search path,
    emits top-k ids + its own recall, and the imported `qp.metrics.recall_at_k` must reproduce that
    recall on the *same* ids (≈0.983). A mismatch is a real defect, not a tolerance issue.
-3. **First shot (region-map alignment + E1 headline)** — flipping one bit of the 64-byte rotation
-   (RaBitQ's `sq_scale`-analog single-point structure) must silently collapse recall. This both
-   confirms the region map is byte-aligned to *this* build and is E1's first datapoint.
-   **Report-and-stop**: if rotation does **not** collapse (mean `pct_collapse` < `ROT_COLLAPSE_MIN`),
-   the script exits 7 with a message — that is a finding (map offset, or rotation more graceful than
-   predicted), not necessarily a bug. Do not proceed blindly; inspect
-   `artifacts_smoke/phase3/e1/vuln_map.json`.
+3. **First shot (region-map alignment + E1 headline)** — flipping bits of the 64-byte rotation must
+   demonstrably move recall, confirming the region map is byte-aligned to *this* build (rotation
+   bytes are consumed by the search). The gate is on the **alignment signal** `max ΔRecall@10` ≥
+   `ROT_ALIGN_DRECALL_MIN` (default 0.05), **not** on a collapse fraction: rotation is heavy-tailed
+   (most bits perturb recall slightly; a few are catastrophic), so the script *reports* severity
+   (collapse %, max/p99 ΔRecall) rather than gating on it. **Report-and-stop (exit 7)** only when
+   rotation is **inert** (signal < threshold) → the region map is likely offset; inspect
+   `artifacts_smoke/phase3/e1/vuln_map.json`. Real ΔRecall magnitudes come from item 4 at ef=2000;
+   the first shot runs at smoke ef=64 (hence `--clean-tol 0.05`).
 4. **E1 full vuln map** — `artifacts/phase3/e1/vuln_map.{json,csv}` + `criticality.json` (Top-Down
    reduction order + three-tier scrub allocation + cost). Rotation exhaustive (512 bits),
    per-vector structures sampled with bootstrap CI.
@@ -91,10 +93,12 @@ Items 1–3 also gate `--smoke`; 4–6 are the full-run deliverables.
 
 `exp_dumpids` currently emits ids + `RECALL`, so the runner detects **crash** + **silent** but
 reports `n_nan_inf` as *not-detected* (`nan_inf_supported=false`, honestly flagged — never zero).
-To get the full silent / nan-inf / crash split via the identical `qp.metrics` classifier, add a
-companion `<out>.dist.fvecs` top-k distance dump in `rabitq_instrumentation/exp_dumpids.cpp` and
-rebuild via `build_rabitq.sh`; the adapter already reads it when present. See **E1_RUNBOOK.md §2** —
-this is optional and the silent-collapse map (the F1 headline) is produced either way.
+Because of this the script passes **`--allow-no-distances`** on every real run: without it the
+runner would report-and-stop on the nan-inf-undetectability guard. To instead get the full silent /
+nan-inf / crash split via the identical `qp.metrics` classifier, add a companion `<out>.dist.fvecs`
+top-k distance dump in `rabitq_instrumentation/exp_dumpids.cpp` and rebuild via `build_rabitq.sh`;
+the adapter reads it when present and the flag then becomes a harmless no-op. See **E1_RUNBOOK.md
+§2** — this is optional and the silent-collapse map (the F1 headline) is produced either way.
 
 ## Overrides (env vars)
 

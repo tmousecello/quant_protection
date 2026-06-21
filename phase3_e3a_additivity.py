@@ -81,6 +81,10 @@ def run(args):
     rmap = adapter.region_map()
     clean = e1.clean_baseline(adapter, ref_buf, tmp, cfg, timeout)
     e1.log(f"[e3a] adapter={adapter_name(adapter)} clean@10={clean['recall@10']:.4f} cfg={cfg}")
+    # Same report-and-stop guards E1 applies (real adapter only): nan-inf detectability + the
+    # operating-point anchor. Without them E3a could measure additivity on a mis-pointed/degraded
+    # baseline with nan-inf silently folded into collapse. Stub: warn-only, never raises.
+    e1._gate_clean_baseline(adapter, adapter_name(adapter), clean, args)
 
     results = []
     for struct in STRUCTS:
@@ -133,6 +137,10 @@ def main():
     ap.add_argument("--timeout", type=float, default=config.PHASE2_FLIP_TIMEOUT_S)
     ap.add_argument("--seed", type=int, default=config.SEED)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--clean-tol", type=float, default=0.02,
+                    help="max |clean@10 - anchor| before report-and-stop (smoke ef lowers clean)")
+    ap.add_argument("--allow-no-distances", action="store_true",
+                    help="accept nan-inf-undetectable real runs (no exp_dumpids distance dump)")
     args = ap.parse_args()
     if args.out is None:
         args.out = (os.path.join(config.ROOT, "artifacts_smoke", "phase3", "e3a") if args.smoke

@@ -73,6 +73,48 @@ def test_e1_criticality_tiers_and_cost(tmp_path):
     assert any("REPORT-AND-STOP" in n for n in crit["notes"])
 
 
+def _crit_row(region, *, pct_collapse=0.0, pct_catastrophic=0.0, n_crash=0, n_samples=100,
+              max_dr=0.0, p99_dr=0.0, kind="data"):
+    """Minimal vuln_map row carrying only the fields derive_criticality reads."""
+    return {"region": region, "kind": kind, "pct_collapse": pct_collapse,
+            "pct_catastrophic": pct_catastrophic, "n_crash": n_crash, "n_samples": n_samples,
+            "max_dRecall@10": max_dr, "p99_dRecall@10": p99_dr}
+
+
+def _agg(*names):
+    return {"index": "RABITQ", "header": {}, "regions": [{"name": n, "byte_len": 64} for n in names]}
+
+
+def test_criticality_global_singlepoint_upgrade():
+    """A heavy-tailed GLOBAL structure (rare collapse bit, low frequency) upgrades to frequent_scrub;
+    a per-vector structure with the SAME low frequency does not. Mirrors the real rotation data
+    (mean pct_collapse ~0.2, max ΔRecall@10 ~0.5)."""
+    rows = [
+        # global, rare-but-devastating: pct_collapse 0.2 (<5) but >0 and max ΔRecall ~0.5
+        _crit_row("rotation", pct_collapse=0.2, pct_catastrophic=12.0, max_dr=0.496, p99_dr=0.34),
+        # per-vector, identical low frequency -> NOT upgraded (one bad bit among ~1e6 is negligible)
+        _crit_row("bin_factors", pct_collapse=0.2, pct_catastrophic=12.0, max_dr=0.49, p99_dr=0.3),
+    ]
+    ranking = e1.derive_criticality(rows, rmap=None, agg=_agg("rotation", "bin_factors"))
+    tier = {o["structure"]: o["scrub_tier"] for o in ranking}
+    assert tier["rotation"] == "frequent_scrub"    # global + has a single-point-collapse bit
+    assert tier["bin_factors"] == "crc_eb_lazy"     # harmful but not upgraded (per-vector)
+    # severity tail is surfaced for transparency
+    rot = next(o for o in ranking if o["structure"] == "rotation")
+    assert rot["max_dRecall@10"] == 0.496 and rot["p99_dRecall@10"] == 0.34
+
+
+def test_criticality_crash_does_not_count_as_harmful():
+    """Crash share is detectable (bounds_check), not silent harm: a structure with sub-threshold
+    silent harm + sub-threshold crash must NOT be escalated to crc_eb_lazy by summing the two."""
+    # n_samples=100: 3 crashes (pct_crash 3 <5) + 3 silent-harm flips -> pct_catastrophic=6.
+    rows = [_crit_row("bin_factors", pct_collapse=0.0, pct_catastrophic=6.0, n_crash=3,
+                      n_samples=100, max_dr=0.02)]
+    ranking = e1.derive_criticality(rows, rmap=None, agg=_agg("bin_factors"))
+    # harmful_noncrash = 6 - 3 = 3 (<5) -> none (old code summed crash in and gave crc_eb_lazy).
+    assert ranking[0]["scrub_tier"] == "none"
+
+
 def test_e1_deterministic(tmp_path):
     a = tmp_path / "a"
     b = tmp_path / "b"

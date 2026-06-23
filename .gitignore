@@ -36,6 +36,14 @@ artifacts/phase2/**/*.npy
 artifacts/phase2/**/*.jsonl
 artifacts/phase2/**/*.done
 
+# --- phase3 heavy / binary outputs (rebuilt by stage runners) ---
+# raw/ dirs hold corrupted FAISS index snapshots + per-flip jsonl shards + done sentinels
+artifacts/phase3/e*/raw/
+# corrupted index snapshots written beside each experiment dir
+artifacts/phase3/e*/_corrupt.index
+# binary ANN result files (ivecs format; regenerable from the corrupted index + query set)
+artifacts/phase3/e*/*.out.ivecs
+
 # Everything else under artifacts/ IS tracked on purpose (small text results):
 #   artifacts/phase2/*.md (README/prompt), vuln_map_pq.csv, graph_edges_characterization.csv,
 #   rollup/curve*.csv + region_terms.csv, detection/{coverage.csv,*_summary.json,expected_ranges.json},

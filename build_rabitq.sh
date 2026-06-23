@@ -102,12 +102,11 @@ EOF
   exit 2
 fi
 
-# 3c. macOS/AppleClang OpenMP flag fix (build-portability only; no logic change) ----
-# Upstream CMAKE_CXX_FLAGS hard-codes "-fopenmp -lrt" via SET(...), which clobbers any -D
-# override and which Apple's stock clang rejects (no bundled OpenMP; -lrt is Linux-only).
-# Rewrite ONLY the flags line to the libomp recipe: -Xclang -fopenmp + libomp include/lib.
-# Re-applied every run because the step-1 checkout restores the pristine file first.
-# Only reached on an x86-64 macOS host (the arch gate above already stopped arm64).
+# 3c. Compiler/platform OpenMP flag fix (build-portability only; no logic change) ----
+# The pinned upstream CMakeLists.txt hard-codes macOS/AppleClang flags:
+#   -Xclang -fopenmp -I/opt/homebrew/... -L/opt/homebrew/... -lomp
+# -Xclang is a Clang-only flag; GCC rejects it. Rewrite for each platform.
+# Re-applied every run because step-1 checkout restores the pristine file.
 if [ "$(uname)" = "Darwin" ]; then
   LIBOMP="$(brew --prefix libomp 2>/dev/null)"
   [ -d "$LIBOMP" ] || fail "libomp not found (brew install libomp)"
@@ -115,6 +114,12 @@ if [ "$(uname)" = "Darwin" ]; then
   NEWFLAGS="-Wall -Ofast -Wextra -march=native -fpic -Xclang -fopenmp -I$LIBOMP/include -L$LIBOMP/lib -lomp -ftree-vectorize -fexceptions"
   /usr/bin/sed -i '' -E "s|^SET\\(CMAKE_CXX_FLAGS.*|SET(CMAKE_CXX_FLAGS  \"$NEWFLAGS\")|" "$LIB/CMakeLists.txt"
   grep -q 'Xclang' "$LIB/CMakeLists.txt" || fail "CMAKE_CXX_FLAGS flag-patch did not apply"
+elif [ "$(uname)" = "Linux" ]; then
+  say "[3/7] patching CMAKE_CXX_FLAGS for Linux/GCC (drop -Xclang/-lomp/homebrew paths)"
+  NEWFLAGS="-Wall -Ofast -Wextra -march=native -fpic -fopenmp -ftree-vectorize -fexceptions"
+  sed -i -E "s|^SET\\(CMAKE_CXX_FLAGS.*|SET(CMAKE_CXX_FLAGS  \"$NEWFLAGS\")|" "$LIB/CMakeLists.txt"
+  grep -q 'fopenmp' "$LIB/CMakeLists.txt" || fail "CMAKE_CXX_FLAGS flag-patch did not apply"
+  if grep -q 'Xclang' "$LIB/CMakeLists.txt"; then fail "CMAKE_CXX_FLAGS still contains -Xclang after patch"; fi
 fi
 
 # 4. BUILD ----------------------------------------------------------------

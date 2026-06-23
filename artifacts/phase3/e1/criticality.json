@@ -1,0 +1,166 @@
+{
+  "adapter": "real",
+  "criticality_order": [
+    {
+      "structure": "rotation",
+      "kind": "sq_scale",
+      "pct_collapse": 0.781,
+      "pct_harmful": 100.0,
+      "pct_crash": 0.0,
+      "max_dRecall@10": 0.5237,
+      "p99_dRecall@10": 0.429,
+      "footprint_bytes": 64,
+      "scrub_tier": "frequent_scrub",
+      "criticality_rank": 1
+    },
+    {
+      "structure": "centroids",
+      "kind": "centroid",
+      "pct_collapse": 0.0,
+      "pct_harmful": 68.75,
+      "pct_crash": 0.0,
+      "max_dRecall@10": 0.1164,
+      "p99_dRecall@10": 0.1164,
+      "footprint_bytes": 8192,
+      "scrub_tier": "crc_eb_lazy",
+      "criticality_rank": 2
+    },
+    {
+      "structure": "cluster_id",
+      "kind": "codes_meta",
+      "pct_collapse": 0.0,
+      "pct_harmful": 0.0,
+      "pct_crash": 50.829,
+      "max_dRecall@10": 0.0044,
+      "p99_dRecall@10": 0.0044,
+      "footprint_bytes": 4000000,
+      "scrub_tier": "bounds_check",
+      "criticality_rank": 3
+    },
+    {
+      "structure": "links",
+      "kind": "graph_edges",
+      "pct_collapse": 0.0,
+      "pct_harmful": 0.0,
+      "pct_crash": 47.922,
+      "max_dRecall@10": 0.0002,
+      "p99_dRecall@10": 0.0,
+      "footprint_bytes": 132000000,
+      "scrub_tier": "bounds_check",
+      "criticality_rank": 4
+    },
+    {
+      "structure": "ex_factors",
+      "kind": "sq_scale",
+      "pct_collapse": 0.0,
+      "pct_harmful": 0.0,
+      "pct_crash": 0.0,
+      "max_dRecall@10": 0.0002,
+      "p99_dRecall@10": 0.0002,
+      "footprint_bytes": 8000000,
+      "scrub_tier": "none",
+      "criticality_rank": 5
+    },
+    {
+      "structure": "header",
+      "kind": "header",
+      "pct_collapse": 0.0,
+      "pct_harmful": 0.0,
+      "pct_crash": 87.273,
+      "max_dRecall@10": 0.0,
+      "p99_dRecall@10": 0.0,
+      "footprint_bytes": 156,
+      "scrub_tier": "bounds_check",
+      "criticality_rank": 6
+    },
+    {
+      "structure": "label",
+      "kind": "codes_meta",
+      "pct_collapse": 0.0,
+      "pct_harmful": 0.0,
+      "pct_crash": 0.0,
+      "max_dRecall@10": 0.0,
+      "p99_dRecall@10": 0.0,
+      "footprint_bytes": 4000000,
+      "scrub_tier": "none",
+      "criticality_rank": 7
+    },
+    {
+      "structure": "bin_factors",
+      "kind": "sq_scale",
+      "pct_collapse": 0.0,
+      "pct_harmful": 0.0,
+      "pct_crash": 0.0,
+      "max_dRecall@10": 0.0,
+      "p99_dRecall@10": 0.0,
+      "footprint_bytes": 12000000,
+      "scrub_tier": "none",
+      "criticality_rank": 8
+    },
+    {
+      "structure": "bin_code",
+      "kind": "codes",
+      "pct_collapse": 0.0,
+      "pct_harmful": 0.0,
+      "pct_crash": 0.0,
+      "max_dRecall@10": 0.0,
+      "p99_dRecall@10": 0.0,
+      "footprint_bytes": 16000000,
+      "scrub_tier": "none",
+      "criticality_rank": 9
+    },
+    {
+      "structure": "ex_code",
+      "kind": "codes",
+      "pct_collapse": 0.0,
+      "pct_harmful": 0.0,
+      "pct_crash": 0.0,
+      "max_dRecall@10": 0.0,
+      "p99_dRecall@10": 0.0,
+      "footprint_bytes": 96000000,
+      "scrub_tier": "none",
+      "criticality_rank": 10
+    }
+  ],
+  "cost": {
+    "protection_assignment": {
+      "rotation": {
+        "mult": 3,
+        "checksum_bytes": 4
+      },
+      "centroids": {
+        "mult": 1,
+        "checksum_bytes": 4
+      },
+      "cluster_id": {
+        "mult": 1,
+        "checksum_bytes": 4
+      },
+      "links": {
+        "mult": 1,
+        "checksum_bytes": 4
+      },
+      "header": {
+        "mult": 1,
+        "checksum_bytes": 4
+      }
+    },
+    "mem_cost": {
+      "replication_bytes": 128,
+      "checksum_bytes": 20,
+      "total_bytes": 148,
+      "by_struct": {
+        "rotation": 132,
+        "centroids": 4,
+        "cluster_id": 4,
+        "links": 4,
+        "header": 4
+      }
+    },
+    "index_total_bytes": 272008412,
+    "protection_overhead_pct": 0.0001
+  },
+  "notes": [
+    "ex_code high-vs-low extension-bit resolution is REPORT-AND-STOP: pack_excode.hpp packs ex_bits as bit-planes interleaved across non-contiguous bytes within 16/64-dim SIMD blocks (distinct packer per ex_bits), so there is no contiguous high/low byte region. Treated as a single flat class 'ex_code'. Finer resolution needs decoding packing_{ex_bits}bit_excode."
+  ]
+}

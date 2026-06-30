@@ -29,6 +29,8 @@ import sys
 import numpy as np
 
 from qp import config, faults
+from qp.provenance import collect_provenance
+from qp.rawio import RawWriter
 from qp.rabitq import get_adapter, adapter_name
 import phase3_e1_vuln as e1
 from phase3_e3a_additivity import structure_region, sample_k_positions
@@ -67,8 +69,9 @@ def run(args):
     timeout = args.timeout
     adapter = get_adapter(args.adapter)
     out = os.path.abspath(args.out)
-    os.makedirs(out, exist_ok=True)
-    tmp = os.path.join(out, "_corrupt.index")
+    os.makedirs(os.path.join(out, "raw"), exist_ok=True)
+    tmp = os.path.join(out, "raw", "_corrupt.index")
+    raw_path = os.path.join(out, "raw", "e3b.records.jsonl")
 
     ref_buf = adapter.serialize_index()
     rmap = adapter.region_map()
@@ -80,6 +83,7 @@ def run(args):
     e1._gate_clean_baseline(adapter, adapter_name(adapter), clean, args)
 
     results = []
+    raw = RawWriter(raw_path)                                # per-flip audit trail (qp.rawio)
     for struct in STRUCTS:
         try:
             bstart, blen = structure_region(rmap, struct)
@@ -105,6 +109,9 @@ def run(args):
                 colls.append(int(bool(rec.get("is_silent_collapse"))))
                 if rec.get("dRecall@10") is not None:
                     drops.append(rec["dRecall@10"])
+                raw.write({**rec, "index": e1.INDEX_NAME, "experiment": "e3b", "structure": struct,
+                           "mode": mode, "trial": t, "n_positions": len(pos),
+                           "clean_recall@10": clean["recall@10"], "seed": args.seed})
             modes[mode] = {"n_trials": cfg["n_trials"], "budget_bits": nflips,
                            "collapse_frac": round(float(np.mean(colls)), 4),
                            "mean_dRecall@10": round(float(np.mean(drops)), 4) if drops else None,
@@ -119,13 +126,15 @@ def run(args):
         e1.log(f"[e3b] {struct}: clustered={modes['clustered']['collapse_frac']} "
                f"uniform={modes['uniform']['collapse_frac']} "
                f"cross_row={modes['cross_row']['collapse_frac']}")
+    raw.close()
 
     # phase1 D1: the shared ref_buf must be byte-pristine after all inject/restore cycles.
     drift_tol = 1e-9 if adapter_name(adapter) == "stub" else 1e-6
     e1.assert_no_state_leak(adapter, ref_buf, tmp, clean, cfg, timeout, drift_tol)
 
+    meta = collect_provenance(adapter, adapter_name(adapter), clean, cfg, args, rmap=rmap)
     with open(os.path.join(out, "e3b.json"), "w") as f:
-        json.dump({"adapter": adapter_name(adapter), "results": results}, f, indent=2)
+        json.dump({"adapter": adapter_name(adapter), "meta": meta, "results": results}, f, indent=2)
     e1.log(f"[e3b] wrote e3b.json ({len(results)} structures)")
     return results
 

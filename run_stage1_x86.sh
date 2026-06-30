@@ -218,7 +218,20 @@ else
   [ $e1_rc  -eq 0 ] || acc_fail=1
   [ $e3a_rc -eq 0 ] || acc_fail=1
   [ $e3b_rc -eq 0 ] || acc_fail=1
-  echo "  per-flip jsonl + run.log preserved under artifacts/phase3/{e1,e3a,e3b}/ for offline debugging."
-  [ "$acc_fail" -ne 0 ] && die "Stage 1 acceptance FAILED (see above). Per-flip jsonl + run.log are enough to reproduce/debug offline against the stub."
-  echo "=== Stage 1 acceptance PASSED — all items green. Copy artifacts/phase3/{e1,e3a,e3b}/ back to the dev machine for analysis + golden update. ==="
+  echo "  per-flip jsonl (e1/e3a/e3b raw/*.records.jsonl) + run.log preserved for offline debugging."
+  # CONFIRM (not infer) the platform actually stamped into the result JSONs: meta.platform_confirmed_real
+  # must be True (adapter=real AND x86_64 AND clean on-plateau), else the numbers are not stampable.
+  confirmed=$("$PY" - "$QP_ROOT/artifacts/phase3/e1/criticality.json" <<'PY'
+import json, sys
+try:
+    m = json.load(open(sys.argv[1]))["meta"]
+    print("yes" if m.get("platform_confirmed_real") else "no:" + ";".join(m.get("confirmation_basis", [])))
+except Exception as e:
+    print(f"no:{e}")
+PY
+)
+  echo "  platform_confirmed_real ....... $confirmed"
+  [ "$confirmed" = "yes" ] || acc_fail=1
+  [ "$acc_fail" -ne 0 ] && die "Stage 1 acceptance FAILED (see above). If platform_confirmed_real != yes, the run is NOT a stampable scientific result. Per-flip jsonl + run.log reproduce/debug offline against the stub."
+  echo "=== Stage 1 acceptance PASSED — platform CONFIRMED + all items green. Copy the WHOLE artifacts/phase3/{e1,e3a,e3b}/ tree (incl raw/) back to the dev machine for analysis + golden update. ==="
 fi

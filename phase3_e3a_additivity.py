@@ -25,6 +25,8 @@ import sys
 import numpy as np
 
 from qp import config
+from qp.provenance import collect_provenance
+from qp.rawio import RawWriter
 from qp.rabitq import get_adapter, adapter_name, layout
 import phase3_e1_vuln as e1
 
@@ -54,7 +56,8 @@ def sample_k_positions(byte_start, byte_len, k, rng):
     return [((byte_start * 8 + int(o)) // 8, (byte_start * 8 + int(o)) % 8) for o in offs]
 
 
-def estimate_p1(adapter, ref_buf, tmp, byte_start, byte_len, clean, cfg, timeout, cap):
+def estimate_p1(adapter, ref_buf, tmp, byte_start, byte_len, clean, cfg, timeout, cap,
+                raw=None, struct=None, seed=None):
     """Single-bit collapse fraction over a (capped, evenly spread) set of the structure's bits."""
     n_bits = byte_len * 8
     take = min(cap, n_bits)
@@ -65,6 +68,11 @@ def estimate_p1(adapter, ref_buf, tmp, byte_start, byte_len, clean, cfg, timeout
         rec = e1.apply_and_measure(adapter, ref_buf, tmp, [(abs_bit // 8, abs_bit % 8)],
                                    clean, cfg, timeout)
         n_coll += int(bool(rec.get("is_silent_collapse")))
+        if raw is not None:
+            raw.write({**rec, "index": e1.INDEX_NAME, "experiment": "e3a", "phase": "p1",
+                       "structure": struct, "k": 1, "n_positions": 1,
+                       "byte_pos": abs_bit // 8, "bit": abs_bit % 8,
+                       "clean_recall@10": clean["recall@10"], "seed": seed})
     return n_coll / take, take
 
 
@@ -74,8 +82,9 @@ def run(args):
     timeout = args.timeout
     adapter = get_adapter(args.adapter)
     out = os.path.abspath(args.out)
-    os.makedirs(out, exist_ok=True)
-    tmp = os.path.join(out, "_corrupt.index")
+    os.makedirs(os.path.join(out, "raw"), exist_ok=True)
+    tmp = os.path.join(out, "raw", "_corrupt.index")
+    raw_path = os.path.join(out, "raw", "e3a.records.jsonl")
 
     ref_buf = adapter.serialize_index()
     rmap = adapter.region_map()
@@ -87,44 +96,49 @@ def run(args):
     e1._gate_clean_baseline(adapter, adapter_name(adapter), clean, args)
 
     results = []
-    for struct in STRUCTS:
-        try:
-            bstart, blen = structure_region(rmap, struct)
-        except KeyError:
-            e1.log(f"[e3a] {struct}: absent, skip")
-            continue
-        # Deterministic per-structure seed (stable integer index, NOT the per-process-salted
-        # builtin hash(str)) so a given --seed reproduces the sampling across runs and machines.
-        rng = np.random.default_rng([args.seed, STRUCTS.index(struct)])
-        p1, n_p1 = estimate_p1(adapter, ref_buf, tmp, bstart, blen, clean, cfg, timeout,
-                               cfg["p1_cap"])
-        curve = []
-        for k in cfg["k_grid"]:
-            if k > blen * 8:
+    with RawWriter(raw_path) as raw:                         # per-flip audit trail (qp.rawio)
+        for struct in STRUCTS:
+            try:
+                bstart, blen = structure_region(rmap, struct)
+            except KeyError:
+                e1.log(f"[e3a] {struct}: absent, skip")
                 continue
-            n_coll = 0
-            for _ in range(cfg["n_trials"]):
-                pos = sample_k_positions(bstart, blen, k, rng)
-                rec = e1.apply_and_measure(adapter, ref_buf, tmp, pos, clean, cfg, timeout)
-                n_coll += int(bool(rec.get("is_silent_collapse")))
-            measured = n_coll / cfg["n_trials"]
-            predicted = 1.0 - (1.0 - p1) ** k
-            curve.append({"k": k, "predicted": round(predicted, 4), "measured": round(measured, 4),
-                          "abs_diff": round(abs(measured - predicted), 4),
-                          "additive": abs(measured - predicted) <= cfg["tol"]})
-        results.append({"structure": struct, "p1_single_bit_collapse": round(p1, 4),
-                        "n_p1_samples": n_p1, "n_trials": cfg["n_trials"],
-                        "tol": cfg["tol"], "curve": curve,
-                        "additivity_holds": all(c["additive"] for c in curve) if curve else None})
-        e1.log(f"[e3a] {struct}: p1={p1:.3f} -> " +
-               " ".join(f"k{c['k']}:{c['measured']}/{c['predicted']}" for c in curve))
+            # Deterministic per-structure seed (stable integer index, NOT the per-process-salted
+            # builtin hash(str)) so a given --seed reproduces the sampling across runs and machines.
+            rng = np.random.default_rng([args.seed, STRUCTS.index(struct)])
+            p1, n_p1 = estimate_p1(adapter, ref_buf, tmp, bstart, blen, clean, cfg, timeout,
+                                   cfg["p1_cap"], raw=raw, struct=struct, seed=args.seed)
+            curve = []
+            for k in cfg["k_grid"]:
+                if k > blen * 8:
+                    continue
+                n_coll = 0
+                for t in range(cfg["n_trials"]):
+                    pos = sample_k_positions(bstart, blen, k, rng)
+                    rec = e1.apply_and_measure(adapter, ref_buf, tmp, pos, clean, cfg, timeout)
+                    n_coll += int(bool(rec.get("is_silent_collapse")))
+                    raw.write({**rec, "index": e1.INDEX_NAME, "experiment": "e3a", "phase": "curve",
+                               "structure": struct, "k": k, "trial": t, "n_positions": len(pos),
+                               "clean_recall@10": clean["recall@10"], "seed": args.seed})
+                measured = n_coll / cfg["n_trials"]
+                predicted = 1.0 - (1.0 - p1) ** k
+                curve.append({"k": k, "predicted": round(predicted, 4), "measured": round(measured, 4),
+                              "abs_diff": round(abs(measured - predicted), 4),
+                              "additive": abs(measured - predicted) <= cfg["tol"]})
+            results.append({"structure": struct, "p1_single_bit_collapse": round(p1, 4),
+                            "n_p1_samples": n_p1, "n_trials": cfg["n_trials"],
+                            "tol": cfg["tol"], "curve": curve,
+                            "additivity_holds": all(c["additive"] for c in curve) if curve else None})
+            e1.log(f"[e3a] {struct}: p1={p1:.3f} -> " +
+                   " ".join(f"k{c['k']}:{c['measured']}/{c['predicted']}" for c in curve))
 
     # phase1 D1: the shared ref_buf must be byte-pristine after all multi-bit inject/restore cycles.
     drift_tol = 1e-9 if adapter_name(adapter) == "stub" else 1e-6
     e1.assert_no_state_leak(adapter, ref_buf, tmp, clean, cfg, timeout, drift_tol)
 
+    meta = collect_provenance(adapter, adapter_name(adapter), clean, cfg, args, rmap=rmap)
     with open(os.path.join(out, "e3a.json"), "w") as f:
-        json.dump({"adapter": adapter_name(adapter), "results": results}, f, indent=2)
+        json.dump({"adapter": adapter_name(adapter), "meta": meta, "results": results}, f, indent=2)
     e1.log(f"[e3a] wrote e3a.json ({len(results)} structures)")
     return results
 

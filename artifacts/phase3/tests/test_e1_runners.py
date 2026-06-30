@@ -57,6 +57,41 @@ def test_e1_rotation_collapses_pointers_crash_bincode_clean(tmp_path):
     assert all(c["pct_collapse"] == 0.0 for c in by["bin_code"])
 
 
+def test_e1_criticality_collapse_fields_renamed_and_overall(tmp_path):
+    """Defect #2: criticality reports worst-bucket AND n-weighted overall, plus the 0-1 frac twins;
+    ranking still uses worst_bucket so rotation stays rank 1."""
+    _, crit = e1.run(_args(tmp_path))
+    rot = crit["criticality_order"][0]
+    assert rot["structure"] == "rotation" and rot["criticality_rank"] == 1   # rank unchanged
+    for key in ("pct_collapse_worst_bucket", "pct_collapse_overall",
+                "frac_collapse_worst_bucket", "frac_collapse_overall"):
+        assert key in rot, key
+    assert "pct_collapse" not in rot                                          # old ambiguous key gone
+    # frac twins are exactly the percents/100
+    assert rot["frac_collapse_worst_bucket"] == pytest.approx(rot["pct_collapse_worst_bucket"] / 100)
+    assert rot["frac_collapse_overall"] == pytest.approx(rot["pct_collapse_overall"] / 100)
+
+
+def test_meta_provenance_and_units_stamped_on_stub(tmp_path):
+    """Defect #1/#3: every Stage-1 JSON carries a meta block with the units legend and a CONFIRMED
+    (not inferred) platform flag — which is False on the arm64/stub dev box."""
+    e1.run(_args(tmp_path))
+    crit = json.load(open(tmp_path / "criticality.json"))
+    vuln = json.load(open(tmp_path / "vuln_map.json"))
+    assert "meta" in crit and "meta" in vuln                       # both stamped
+    meta = crit["meta"]
+    # confirmed-not-inferred: stub on arm64 is never a confirmed real run
+    assert meta["platform_confirmed_real"] is False
+    assert meta["adapter_type"] == "stub"
+    # units legend resolves the percent-vs-fraction ambiguity that caused the 0.781->78 misread
+    assert meta["units"]["pct_collapse_worst_bucket"] == "percent_0_100"
+    assert meta["units"]["frac_collapse_overall"] == "fraction_0_1"
+    assert meta["units"]["collapse_frac"] == "fraction_0_1"
+    # baseline + seed are stamped
+    assert meta["clean_baseline"]["recall@10"] is not None
+    assert meta["study_config"]["seed"] == 1234
+
+
 def test_e1_criticality_tiers_and_cost(tmp_path):
     _, crit = e1.run(_args(tmp_path))
     tier = {o["structure"]: o["scrub_tier"] for o in crit["criticality_order"]}
@@ -132,9 +167,24 @@ def test_e1_resume_reuses_shard(tmp_path):
 
 # --- E3a ----------------------------------------------------------------------
 
+def _assert_raw_jsonl(path, experiment):
+    """Per-flip audit trail exists, one JSON object per line, carrying the shared measurement core
+    + this experiment's envelope."""
+    assert os.path.isfile(path), path
+    lines = [json.loads(l) for l in open(path) if l.strip()]
+    assert lines, "raw jsonl is empty"
+    for r in lines:
+        assert r["experiment"] == experiment
+        assert "is_silent_collapse" in r and "failure_mode" in r and "structure" in r
+        assert r["seed"] == 1234
+
+
 def test_e3a_prediction_formula_and_schema(tmp_path):
     results = e3a.run(_args(tmp_path))
     assert os.path.isfile(tmp_path / "e3a.json")
+    # meta + per-flip raw jsonl (defect #1/#3)
+    assert "meta" in json.load(open(tmp_path / "e3a.json"))
+    _assert_raw_jsonl(tmp_path / "raw" / "e3a.records.jsonl", "e3a")
     rot = next(r for r in results if r["structure"] == "rotation")
     assert rot["p1_single_bit_collapse"] == 1.0
     for c in rot["curve"]:
@@ -150,6 +200,8 @@ def test_e3a_prediction_formula_and_schema(tmp_path):
 def test_e3b_spatial_modes_and_schema(tmp_path):
     results = e3b.run(_args(tmp_path))
     assert os.path.isfile(tmp_path / "e3b.json")
+    assert "meta" in json.load(open(tmp_path / "e3b.json"))
+    _assert_raw_jsonl(tmp_path / "raw" / "e3b.records.jsonl", "e3b")
     rot = next(r for r in results if r["structure"] == "rotation")
     for mode in ("clustered", "uniform", "cross_row"):
         m = rot["modes"][mode]

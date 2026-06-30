@@ -39,6 +39,8 @@ import numpy as np
 
 from qp import config, metrics, buckets
 from qp.bits import flip_bit
+from qp.provenance import collect_provenance
+from qp.rawio import RawWriter
 from qp.rabitq import get_adapter, adapter_name, layout, bitclass
 import phase3_recall as pr
 from phase1_sensitivity import aggregate, write_vuln_map   # reuse the canonical schema/aggregator
@@ -302,13 +304,19 @@ def derive_criticality(rows, rmap, collapse_min=5.0, harmful_min=5.0, crash_min=
         d = by_struct.setdefault(r["region"], {"pct_collapse": 0.0, "pct_harmful": 0.0,
                                                "pct_crash": 0.0, "max_dRecall": 0.0,
                                                "p99_dRecall": 0.0, "has_collapse_bit": False,
-                                               "kind": r["kind"]})
+                                               "sum_coll_w": 0.0, "sum_n": 0, "kind": r["kind"]})
+        # pct_collapse here is the WORST per-bit-class bucket (max). It drives the ranking/tier
+        # because a heavy-tailed structure is as dangerous as its worst bucket — but read alone it
+        # over-reads a small bucket as the structure rate (the 0.78% worst-Kac-stage vs 0.2%
+        # structure-wide gap). The n-weighted OVERALL rate is accumulated alongside for honesty.
         d["pct_collapse"] = max(d["pct_collapse"], r.get("pct_collapse") or 0.0)
         d["has_collapse_bit"] = d["has_collapse_bit"] or (r.get("pct_collapse") or 0.0) > 0.0
         d["max_dRecall"] = max(d["max_dRecall"], r.get("max_dRecall@10") or 0.0)
         d["p99_dRecall"] = max(d["p99_dRecall"], r.get("p99_dRecall@10") or 0.0)
         # pct_crash from failure-mode counts (n_crash / n_samples) per row
         n = r.get("n_samples") or 0
+        d["sum_coll_w"] += (r.get("pct_collapse") or 0.0) * n   # Σ(pct_i·n_i) for overall rate
+        d["sum_n"] += n
         crash_pct = 100.0 * (r.get("n_crash") or 0) / n if n else 0.0
         d["pct_crash"] = max(d["pct_crash"], crash_pct)
         # HARMFUL excluding crash: pct_catastrophic = (ΔR>0.01).sum()+n_crash over n_total
@@ -331,17 +339,25 @@ def derive_criticality(rows, rmap, collapse_min=5.0, harmful_min=5.0, crash_min=
             tier = "crc_eb_lazy"
         else:
             tier = "none"
+        overall = (d["sum_coll_w"] / d["sum_n"]) if d["sum_n"] else 0.0
+        worst = d["pct_collapse"]
         out.append({"structure": struct, "kind": d["kind"],
-                    "pct_collapse": round(d["pct_collapse"], 3),
+                    # worst per-bit-class bucket (drives ranking); overall = n-weighted across all
+                    # enumerated bits. Both percent (0-100); frac_* are the 0-1 twins (see meta.units).
+                    "pct_collapse_worst_bucket": round(worst, 3),
+                    "pct_collapse_overall": round(overall, 3),
+                    "frac_collapse_worst_bucket": round(worst / 100.0, 5),
+                    "frac_collapse_overall": round(overall / 100.0, 5),
                     "pct_harmful": round(d["pct_harmful"], 3),
                     "pct_crash": round(d["pct_crash"], 3),
                     "max_dRecall@10": round(d["max_dRecall"], 4),
                     "p99_dRecall@10": round(d["p99_dRecall"], 4),
                     "footprint_bytes": agg_sizes.get(struct),
                     "scrub_tier": tier})
-    # Top-Down reduction order: collapse fraction first, then worst-case severity (max ΔRecall),
-    # then harmful, then crash, then smaller footprint.
-    out.sort(key=lambda x: (-x["pct_collapse"], -x["max_dRecall@10"], -x["pct_harmful"],
+    # Top-Down reduction order: worst-bucket collapse first (heavy-tail severity), then worst-case
+    # ΔRecall, then harmful, then crash, then smaller footprint. (Ranking uses worst_bucket — same
+    # value as before the rename — so ranks are unchanged by adding the overall twin.)
+    out.sort(key=lambda x: (-x["pct_collapse_worst_bucket"], -x["max_dRecall@10"], -x["pct_harmful"],
                             -x["pct_crash"], x["footprint_bytes"] or 0))
     for i, o in enumerate(out):
         o["criticality_rank"] = i + 1
@@ -399,17 +415,19 @@ def run(args):
 
     rmap = adapter.region_map()                              # computed once, reused everywhere
 
+    # Clean baseline + gate run on BOTH paths so the provenance stamp (meta.clean_baseline,
+    # platform_confirmed_real) is present even on --resume; only the (expensive) sweep is skipped.
+    ref_buf = adapter.serialize_index()
+    clean = clean_baseline(adapter, ref_buf, tmp, cfg, timeout)
+    log(f"[e1] clean recall@10={clean['recall@10']:.4f}  "
+        f"nan_inf_detectable={clean['nan_inf_supported']}")
+    _gate_clean_baseline(adapter, aname, clean, args)
+
     if args.resume and os.path.exists(done):
         log("[e1] --resume: reloading completed shard")
         with open(raw) as fh:
             records = [json.loads(line) for line in fh]
     else:
-        ref_buf = adapter.serialize_index()
-        clean = clean_baseline(adapter, ref_buf, tmp, cfg, timeout)
-        log(f"[e1] clean recall@10={clean['recall@10']:.4f}  "
-            f"nan_inf_detectable={clean['nan_inf_supported']}")
-        _gate_clean_baseline(adapter, aname, clean, args)
-
         rng = np.random.default_rng(args.seed)
         samples = plan_samples(rmap, cfg, rng)
         by = {}
@@ -418,9 +436,8 @@ def run(args):
         log(f"[e1] {len(samples)} flips planned across {len(by)} structures: {by}")
 
         records = []
-        n = 0
         t0 = time.time()
-        with open(raw, "w") as fh:
+        with RawWriter(raw) as w:                            # shared per-flip JSONL writer (qp.rawio)
             for s in samples:
                 rec = measure_flip(adapter, ref_buf, tmp, s, clean, cfg, timeout)
                 tag = bitclass.bit_class(f"elem0.{s['structure']}" if s["element"] is not None
@@ -438,22 +455,20 @@ def run(args):
                 if rec.get("parity_abs") is not None and rec["parity_abs"] > PARITY_TOL:
                     log(f"[e1] [warn] qp<->cpp recall parity {rec['parity_abs']:.4g} > {PARITY_TOL} "
                         f"at {s['structure']}/{tag}")
-                fh.write(json.dumps(rec) + "\n")
-                records.append(rec)
-                n += 1
-                if n % 200 == 0:
-                    fh.flush()
-        # XOR-restore correctness: pristine re-search must reproduce the clean baseline.
+                records.append(w.write(rec))
+        # XOR-restore correctness: pristine re-search must reproduce the clean baseline. The done
+        # marker is written only AFTER the leak check passes, so --resume never reloads a bad shard.
         drift_tol = 1e-9 if aname == "stub" else 1e-6      # real C++ search may have float jitter
         drift = assert_no_state_leak(adapter, ref_buf, tmp, clean, cfg, timeout, drift_tol)
         open(done, "w").close()
-        log(f"[e1] {n} flips in {time.time() - t0:.1f}s (restore drift {drift:.2e})")
+        log(f"[e1] {len(records)} flips in {time.time() - t0:.1f}s (restore drift {drift:.2e})")
 
+    meta = collect_provenance(adapter, aname, clean, cfg, args, rmap=rmap)
     rows = aggregate(records)
-    write_vuln_map(out, rows)
+    write_vuln_map(out, rows, meta=meta)
     agg = layout.aggregate_region_map(rmap)                 # priced once, fed to both consumers
     ranking = derive_criticality(rows, rmap, agg=agg)
-    crit = {"adapter": aname, "criticality_order": ranking,
+    crit = {"adapter": aname, "meta": meta, "criticality_order": ranking,
             "cost": cost_of_allocation(ranking, rmap, agg=agg),
             "notes": [bitclass.EX_CODE_REPORT]}
     with open(os.path.join(out, "criticality.json"), "w") as f:

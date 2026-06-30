@@ -62,14 +62,28 @@ python phase3_e3b_spatial.py    --adapter real 2>&1 | tee artifacts/phase3/e3b/r
   a `crash`; a segfault (nonzero exit) is also a `crash`. A Python-side adapter error aborts loudly
   (it is a harness bug, never counted as a corruption crash).
 - Outputs per experiment: `vuln_map.{json,csv}` + `criticality.json` (E1), `e3a.json`, `e3b.json`,
-  and `raw/rabitq.records.jsonl` (one row per flip) + `raw/rabitq.done`. `--resume` skips a
-  completed shard.
+  and a per-flip audit trail under `raw/`: E1 `raw/rabitq.records.jsonl` (+ `raw/rabitq.done`),
+  E3a `raw/e3a.records.jsonl`, E3b `raw/e3b.records.jsonl`. `--resume` skips a completed E1 shard.
+- **Every result JSON now carries a top-level `meta` block** (`qp.provenance.collect_provenance`):
+  - `units` — the scale legend. `pct_*` (vuln_map/criticality) are **percent 0-100**; `collapse_frac`,
+    `p1_single_bit_collapse`, and the criticality `frac_*` twins are **fraction 0-1**. (This is the
+    fix for reading `0.781`% as `78`.)
+  - `platform_confirmed_real` — **CONFIRMED, not inferred**: True only when adapter=real **and**
+    `platform.machine()==x86_64` **and** clean@10 is on the plateau (within 0.01 of 0.983). On the
+    arm64/stub dev box it is False. `confirmation_basis` records the evidence; `clean_baseline`,
+    `study_config.seed`, `index_geometry`, `rabitq.library_commit`, and dep versions are stamped too.
+- `criticality.json` collapse fields: `pct_collapse_worst_bucket` (worst per-bit-class bucket — what
+  drives the rank) **and** `pct_collapse_overall` (n-weighted across all enumerated bits), each with a
+  `frac_*` twin. The 64-B rotation reads worst_bucket ≈ 0.78% vs overall ≈ 0.2% — both, so neither is
+  mistaken for the other.
 
 ## 4. Bring results back
-Copy `artifacts/phase3/e1|e3a|e3b/` (maps + criticality + raw jsonl + run.log) back to the dev
-machine for analysis, commit, and (if any number legitimately changed) `python
-artifacts/phase3/make_golden.py`. If a run misbehaved, the per-flip jsonl + run.log are enough to
-reproduce/debug offline against the stub. Then proceed to Stage 2 (scrub mechanism + temporal).
+Copy the WHOLE `artifacts/phase3/{e1,e3a,e3b}/` tree — maps + criticality + **`raw/` (all three
+records.jsonl)** + `run.log` — back to the dev machine for analysis, commit, and (if any number
+legitimately changed) `python artifacts/phase3/make_golden.py`. Only a run whose `meta.
+platform_confirmed_real` is True is a stamped scientific result; the arm64/stub outputs are
+plumbing checks. If a run misbehaved, the per-flip jsonl + run.log reproduce/debug it offline against
+the stub. Then proceed to Stage 2 (scrub mechanism + temporal).
 
 ## Known report-and-stop
 - **ex_code bit-class** is flat (`ex_code`). A clean high-vs-low extension-bit split does not exist:

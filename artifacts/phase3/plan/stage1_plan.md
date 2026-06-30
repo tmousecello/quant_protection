@@ -76,8 +76,10 @@
 
 ### 6.4 · 輸出
 - `vuln_map`(F1 的資料)、criticality 排序、scrub 分配、E3a/E3b 結果。
-- **per-flip 原始 jsonl + 豐富 log**(供工作站失敗時離線除錯)。
+- **per-flip 原始 jsonl + 豐富 log**(供工作站失敗時離線除錯)。三支都寫:E1 `raw/rabitq.records.jsonl`、E3a `raw/e3a.records.jsonl`、E3b `raw/e3b.records.jsonl`(共用 `qp.rawio.RawWriter`)。
 - **runbook**(見下)。
+
+> **蓋章後記(review 缺陷 #1–#3 修正)**:每個結果 JSON 都帶頂層 `meta`(`qp.provenance`):`units` 圖例(`pct_*`=percent 0-100、`collapse_frac`/`p1`/`frac_*`=fraction 0-1,解掉 0.781% 被讀成 78% 的歧義);`platform_confirmed_real`=**確認非推定**(real ∧ x86_64 ∧ clean 在 plateau 才 True;arm64/stub 為 False);另含 clean_baseline、seed、index_geometry、RaBitQ commit、dep 版本。criticality collapse 改為 `pct_collapse_worst_bucket`(驅動排序)+ `pct_collapse_overall`(全 bit n-加權)+ 各自 `frac_*` 孿生。**最終蓋章產物需在 x86 重跑、`platform_confirmed_real:true` 才算數。**
 
 ---
 

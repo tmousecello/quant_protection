@@ -229,6 +229,22 @@ def _recall(ids, gt, k):
     return metrics.recall_at_k(ids, gt, k)
 
 
+def search_with_eb_fallback(index_path, fraction, seed=0, *, k=None, ef=2000, out_path=None,
+                            query_f=None, gt_f=None, timeout=None):
+    """Stub stand-in for the EB-fallback search path (E5 slope layer).
+
+    Accepts a file path (same signature as the real adapter's search_with_eb_fallback).
+    Delegates to search_corrupted and tags result with _eb_path=True so unit tests can
+    assert the EB branch was taken. The scientific EB recall improvement is only measurable
+    on x86 with the real binary; stub returns the same deterministic outcome.
+    """
+    res = search_corrupted(index_path, k=k, ef=ef, out_path=out_path,
+                           query_f=query_f, gt_f=gt_f, timeout=timeout)
+    res["_eb_path"] = True
+    res["eb_fraction"] = float(fraction)
+    return res
+
+
 def _distances(ids, finite):
     """Synthetic top-k distances aligned with ids; one non-finite entry when finite=False."""
     nq, k = ids.shape

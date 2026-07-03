@@ -35,7 +35,6 @@ import numpy as np
 
 from qp import config, metrics
 from qp.rabitq import layout
-from qp.rabitq import eb_policy as _eb_policy
 from qp.rabitq.registry import get_adapter, adapter_name
 
 # Default configs
@@ -89,13 +88,20 @@ class RecoveryGuard:
 
         # Bounds-check state
         self._oob_elements = 0
+        self._clean_buf = None        # clean snapshot, set in init_from_clean (for OOB restore)
+
+        if cfg.get("parity_on", False) and self._chunk_size > 64:
+            _log(f"[e5] WARNING: parity_on=True but chunk_size={self._chunk_size} > 64 B; "
+                 f"parity single-byte repair only applies to chunks <= 64 B, so it will no-op "
+                 f"(every CRC failure escalates straight to EB-fallback).")
 
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
 
     def init_from_clean(self, clean_buf):
-        """Snapshot rotation copies + CRC, and ex-data CRCs + clean snapshot."""
+        """Snapshot rotation copies + CRC, ex-data CRCs + clean snapshot, and full clean buf."""
+        self._clean_buf = np.array(clean_buf, dtype=np.uint8)   # authoritative for OOB restore
         R = int(self._cfg.get("R", 3))
         bs, bl = self._rot_region
         rot_bytes = bytes(clean_buf[bs: bs + bl])
@@ -204,17 +210,21 @@ class RecoveryGuard:
                     repaired_bits += 1
         self._cliff_checked += bl * 8
 
+        # Verify the majority-vote result against the authoritative clean CRC BEFORE writing it.
+        # If it fails, >= majority copies were corrupted the same way: flag irrecoverable and do
+        # NOT write the wrong majority into buf (plan §5a: detect, never silently serve a wrong
+        # value). buf is left as-is for the search to proceed under the loud failure flag.
+        if zlib.crc32(bytes(majority)) != self._rot_clean_crc:
+            self._cliff_irrecoverable += 1
+            _log(f"[e5] IRRECOVERABLE: majority-vote rotation result fails clean CRC "
+                 f"(≥{(R+1)//2} copies corrupted same way); buf left unrepaired, not served as fixed")
+            return
+
         if repaired_bits:
             self._cliff_repaired += repaired_bits
             buf[bs: bs + bl] = majority
             for r in range(R):
                 np.copyto(self._rot_copies[r], majority)
-
-        # Verify majority against authoritative clean CRC
-        if zlib.crc32(bytes(majority)) != self._rot_clean_crc:
-            self._cliff_irrecoverable += 1
-            _log(f"[e5] IRRECOVERABLE: majority-vote rotation result fails clean CRC "
-                 f"(≥{(R+1)//2} copies corrupted same way)")
 
     # ------------------------------------------------------------------
     # Slope layer internals
@@ -270,8 +280,9 @@ class RecoveryGuard:
                         buf[abs_start:abs_end] = repaired
                         self._failed_chunks.discard(chunk_idx)
                         continue
+                if chunk_idx not in self._failed_chunks:
+                    self._slope_failed += 1   # count distinct failure EVENTS, not per-tick repeats
                 self._failed_chunks.add(chunk_idx)
-                self._slope_failed += 1
             else:
                 self._failed_chunks.discard(chunk_idx)
 
@@ -323,9 +334,9 @@ class RecoveryGuard:
             reloaded += 1
         self._failed_chunks.clear()
         self._slope_reloaded += reloaded
-        # Recompute CRCs now that chunks are clean
-        exs, exl = self._ex_region
-        self._clean_crcs = self._compute_crcs(buf[exs: exs + exl])
+        # Do NOT recompute _clean_crcs from buf: they already hold the authoritative clean CRCs,
+        # and the reloaded chunks now match them. Recomputing from buf would bake a CRC-collision
+        # dirty chunk (one that slipped past detection) in as the new "clean" baseline.
         _log(f"[e5] slope reload: restored {reloaded} chunks, counter reset")
 
     # ------------------------------------------------------------------
@@ -333,11 +344,20 @@ class RecoveryGuard:
     # ------------------------------------------------------------------
 
     def _bounds_check(self, buf):
-        """Scan a sample of element link/cluster_id/label fields for OOB pointer values."""
+        """Scan element link/cluster_id/label fields for OOB pointers; restore from clean on a hit.
+
+        Detection scans a FIXED slot window (maxM0), NOT the on-disk neighbour count — the count
+        itself may be corrupted to 0, which would otherwise hide every OOB id behind it. On a hit
+        the whole field is restored from the clean snapshot (faithful "skip the bad edge"); this
+        both prevents the downstream crash (plan §5c "不 crash") and never loses the structure.
+        """
         n_sample = int(self._cfg.get("bounds_sample", 16))
         n_elem = self._cur_element_count
         if n_elem == 0:
             return
+        hdr = self._rmap["header"]
+        num_cluster = int(hdr["num_cluster"])
+        maxM0 = int(hdr["maxM0"])
         sample_ids = list(range(min(n_sample, n_elem)))
         for e in sample_ids:
             for field in ("links", "cluster_id", "label"):
@@ -345,25 +365,29 @@ class RecoveryGuard:
                     bs, bl = layout.element_field_range(self._rmap, field, e)
                 except (KeyError, IndexError):
                     continue
+                oob = False
                 if field == "links":
-                    # links: [uint32 count][count * uint32 ids]
-                    if bl < 4:
+                    # links: [uint32 count][maxM0 * uint32 ids]. Scan all physically-present slots.
+                    if bl < 8:
                         continue
-                    count = int.from_bytes(bytes(buf[bs: bs + 4]), "little")
-                    for i in range(min(count, (bl - 4) // 4)):
+                    n_slots = min(maxM0, (bl - 4) // 4)
+                    for i in range(n_slots):
                         vid = int.from_bytes(bytes(buf[bs + 4 + i * 4: bs + 8 + i * 4]), "little")
                         if vid >= n_elem and vid != 0xFFFFFFFF:
-                            self._oob_elements += 1
-                            _log(f"[e5] OOB pointer: elem={e} link={i} val={vid} "
-                                 f"(n_elem={n_elem}); skip")
+                            oob = True
+                            break
                 else:
                     if bl < 4:
                         continue
+                    limit = num_cluster if field == "cluster_id" else n_elem
                     val = int.from_bytes(bytes(buf[bs: bs + 4]), "little")
-                    limit = n_elem if field == "cluster_id" else n_elem
                     if val >= limit and val != 0xFFFFFFFF:
-                        self._oob_elements += 1
-                        _log(f"[e5] OOB {field}: elem={e} val={val}; skip")
+                        oob = True
+                if oob:
+                    self._oob_elements += 1
+                    if self._clean_buf is not None:
+                        buf[bs: bs + bl] = self._clean_buf[bs: bs + bl]   # restore -> no crash
+                    _log(f"[e5] OOB {field}: elem={e} restored from clean snapshot; skip")
 
     # ------------------------------------------------------------------
     # Region helpers
@@ -377,16 +401,17 @@ class RecoveryGuard:
         raise KeyError(f"region {name!r} not found in rmap")
 
     def _find_region_ex(self):
-        """Find the ex_code aggregate region, or None if the index has no ex data."""
-        hdr = self._rmap["header"]
-        n = int(hdr["cur_element_count"])
-        if n == 0:
+        """Element-0 ex_code as the representative slope region, or None if no ex data.
+
+        The slope layer protects the ex_data STRUCTURE; using element 0's ex_code (96 B) — not
+        the whole level0 span the previous code computed — keeps the studied variable isolated
+        and matches the E3a/E3b element-0 convention. Experiment B's multi-element ex gradient
+        is a separate workstation concern.
+        """
+        if int(self._rmap["header"]["cur_element_count"]) == 0:
             return None
         try:
-            bs0, bl0 = layout.element_field_range(self._rmap, "ex_code", 0)
-            bs_last, _ = layout.element_field_range(self._rmap, "ex_code", n - 1)
-            total = (bs_last - bs0) + bl0   # contiguous only if stride == bl0; good enough
-            return (bs0, total)
+            return layout.element_field_range(self._rmap, "ex_code", 0)
         except (KeyError, IndexError):
             return None
 
@@ -414,7 +439,7 @@ def run(args):
                            "phase3", "e5")
     os.makedirs(out_dir, exist_ok=True)
 
-    from phase3_e3c_temporal import TemporalCorruptor, PATTERNS, _resolve_region
+    from phase3_e3c_temporal import TemporalCorruptor, _resolve_region, region_label
 
     adapter = get_adapter(args.adapter)
     aname = adapter_name(adapter)
@@ -428,18 +453,18 @@ def run(args):
 
     # Set up E3c for the specified region + pattern
     region_name = args.region
+    rlabel = region_label(region_name)
     region = _resolve_region(rmap, region_name)
     corruptor = TemporalCorruptor(region, cfg)
 
     buf = clean_buf.copy()
 
-    print(f"[e5] adapter={aname} region={region_name} pattern={args.pattern} "
+    print(f"[e5] adapter={aname} region={rlabel} pattern={args.pattern} "
           f"ticks={cfg['ticks']} parity_on={cfg['parity_on']}")
 
     records = []
-    raw_path = os.path.join(out_dir, f"e5_{args.pattern}_{region_name}.records.jsonl")
-    with open(raw_path, "w") as raw_f, tempfile.NamedTemporaryFile(
-            suffix=".index", delete=False) as tmp_f:
+    raw_path = os.path.join(out_dir, f"e5_{args.pattern}_{rlabel}.records.jsonl")
+    with tempfile.NamedTemporaryFile(suffix=".index", delete=False) as tmp_f:
         tmp_path = tmp_f.name
 
     try:
@@ -457,7 +482,7 @@ def run(args):
                 row = {"tick": tick, "cumulative_corruption": cc,
                        "recall@10": recall, "counters": ctr,
                        "_eb_path": res.get("_eb_path", False),
-                       "pattern": args.pattern, "region": region_name, "adapter": aname}
+                       "pattern": args.pattern, "region": rlabel, "adapter": aname}
                 raw_f.write(json.dumps(row) + "\n")
                 records.append(row)
                 guard.scrub_if_due(buf, tick)
@@ -471,12 +496,12 @@ def run(args):
             os.unlink(tmp_path)
 
     summary = {
-        "pattern": args.pattern, "region": region_name, "ticks": cfg["ticks"],
+        "pattern": args.pattern, "region": rlabel, "ticks": cfg["ticks"],
         "final_counters": records[-1]["counters"] if records else {},
         "final_recall@10": records[-1]["recall@10"] if records else None,
         "adapter": aname, "cfg": cfg,
     }
-    out_json = os.path.join(out_dir, f"e5_{args.pattern}_{region_name}.json")
+    out_json = os.path.join(out_dir, f"e5_{args.pattern}_{rlabel}.json")
     with open(out_json, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"[e5] done → {out_json}")

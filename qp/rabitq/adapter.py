@@ -182,43 +182,34 @@ def query_ids(index_path=None, k=None, ef=2000, out_path=None, query_f=None, gt_
     return ids, cpp_recall
 
 
-def search_with_eb_fallback(index_path, fraction, seed=0, k=None, ef=2000,
+def search_with_eb_fallback(index_path, fraction, seed=0, *, k=None, ef=2000,
                             out_path=None, query_f=None, gt_f=None, timeout=None):
-    """Run the EB-aware fallback recovery policy via exp_faultinject.
+    """REPORT-AND-STOP: pre-corrupted EB-fallback ranking is not available on current binaries.
 
-    DESIGN-GAP NOTE (surfaces for human decision in E5_RUNBOOK.md):
-    exp_faultinject applies fault injection internally on a CLEAN index using
-    set_fault_injection(FAULT_FALLBACK_EB, fraction, seed). By the time E5 calls this,
-    E3c has already corrupted index_path. Two options:
-      Option A (this implementation): pass the PRE-CORRUPTED index_path to exp_faultinject,
-        which then applies ADDITIONAL fault injection at `fraction`. This double-corrupts, which
-        is wrong. Use the CLEAN index path instead (caller must supply original_index_path).
-      Option B: patch exp_dumpids to add --recovery fallback_eb mode (C++ change).
-    This function implements a best-effort Option-A wrapper; if the clean-index path is
-    unavailable, raise REPORT-AND-STOP. Callers should pass the clean backup path.
+    The E5 slope layer wants to re-rank an ALREADY-corrupted index with Samuel's EB policy
+    (protected bin + error bound, hnsw.hpp FAULT_FALLBACK_EB). That cannot be done with the
+    binaries build_rabitq.sh produces, so this path stops loudly instead of faking it:
+
+      * The real exp_faultinject CLI is `<index> <query> <gt> [l2|ip] [seed]`. It loads ONE
+        CLEAN index, sweeps ALL policies × fractions internally (set_fault_injection just marks
+        a fraction of vectors corrupt in an in-memory bitmap — it does NOT flip bytes), and
+        prints a CSV. It takes no policy/fraction/out_path/k/ef arg and emits no RECALL line, so
+        it cannot rank a caller-supplied corrupted buffer. (The previous Option-A wrapper here
+        was coded against a hypothetical patched binary and would have double-corrupted: it fed
+        the already-corrupted index to exp_faultinject, which then injected MORE faults.)
+      * EB ranking needs query-time quantities (est_dist, g_error) computed inside the C++
+        search; they do not exist in Python, so qp.rabitq.eb_policy.eb_rank_dist is only a
+        documented formula reference, not a runnable Python recovery path.
+
+    True pre-corrupted EB requires Option B: patch exp_dumpids with a `--recovery fallback_eb`
+    mode (workstation/C++ work). Until then, raise. See artifacts/phase3/E5_RUNBOOK.md.
     """
-    _require_binaries()
-    k = config.K if k is None else int(k)
-    index_path = index_path or INDEX_PATH
-    query_f = query_f or os.path.join(PREP, "query.fvecs")
-    gt_f = gt_f or os.path.join(PREP, "groundtruth.ivecs")
-    out_path = out_path or os.path.join(PREP, f"_eb_fallback_ef{int(ef)}_k{k}.ivecs")
-    # exp_faultinject signature: <index> <query.fvecs> <gt.ivecs> <l2|ip> <policy> <fraction> <seed> <ef>
-    # policy string: "fallback_eb" (see exp_faultinject.cpp POLICIES enum string map)
-    cmd = [os.path.join(BIN, "exp_faultinject"), index_path, query_f, gt_f, METRIC,
-           "fallback_eb", str(float(fraction)), str(int(seed)), str(int(ef)), out_path, str(k)]
-    res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
-    cpp_recall = None
-    for line in res.stdout.splitlines():
-        parts = line.strip().split("\t")
-        if len(parts) == 2 and parts[0] == "RECALL":
-            cpp_recall = float(parts[1])
-    if cpp_recall is None:
-        raise RuntimeError(
-            f"exp_faultinject (fallback_eb) did not print a RECALL line; stdout:\n{res.stdout}")
-    ids = read_ivecs(out_path)
-    return {"ids": ids, "cpp_recall": cpp_recall, "distances": None, "_eb_path": True,
-            "eb_fraction": float(fraction)}
+    raise RuntimeError(
+        "REPORT-AND-STOP: pre-corrupted EB-fallback ranking needs the Option-B C++ patch "
+        "(exp_dumpids --recovery fallback_eb); the current exp_faultinject binary cannot rank a "
+        "supplied corrupted index (its CLI is <index> <query> <gt> [l2|ip] [seed], sweeps "
+        "internally, prints CSV). See E5_RUNBOOK.md. "
+        f"(index_path={index_path!r}, fraction={fraction!r}, seed={seed!r})")
 
 
 def search_corrupted(index_path, k=None, ef=2000, out_path=None, query_f=None, gt_f=None,

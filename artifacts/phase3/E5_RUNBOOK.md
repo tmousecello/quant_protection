@@ -77,10 +77,13 @@ python phase3_e5_recovery.py --adapter real --region ex_code \
 **Verify:**
 - `slope_failed > 0` by mid-run (ex_code chunks accumulate errors)
 - `slope_reloaded` increments when `len(failed_chunks)/total_chunks > 0.10` (lazy reload fires)
-- `_eb_path=True` in search result when slope corruption detected
+- `_eb_path=True` in search result when slope corruption detected — **stub only**.
 
-**EB-fallback design gap (see §Design Gap below)**:
-If `eb_fraction` is non-zero but recall does NOT improve vs. the plain-corrupted baseline, this is expected on x86 if Option A (approximate) is chosen: `exp_faultinject` injects on the CLEAN index, not the pre-corrupted buffer. Treat Option A as an approximation for the recall statistics; document in provenance.
+**EB-fallback on x86 — REPORT-AND-STOP (see §Design Gap below)**:
+On the real adapter, the slope EB path now **raises** (`adapter.search_with_eb_fallback` cannot run
+on the current binaries — see the gap section). So on x86 the ex/slope smoke will stop the moment a
+chunk CRC fails. This is intended: it is not faked. Rotation/cliff smoke and Experiment A are
+unaffected. Build Option B (`exp_dumpids --recovery fallback_eb`) before running Experiment B.
 
 ---
 
@@ -127,24 +130,27 @@ Plot: x=tick, y=recall; one curve per pattern. Annotate `slope_reloaded` events.
 
 ## Design Gap — EB-fallback and pre-corrupted buffer
 
-**The problem**: `exp_faultinject` (Samuel's binary) applies fault injection to a CLEAN index
-INTERNALLY using `set_fault_injection(FAULT_FALLBACK_EB, fraction, seed)`. By the time E5 calls
-`search_with_eb_fallback`, the buffer has already been corrupted by E3c. Passing the
-pre-corrupted path to `exp_faultinject` causes double-corruption, which is wrong.
+**The problem**: the real `exp_faultinject` binary cannot rank a caller-supplied corrupted
+index. Its actual CLI is `<index> <query> <gt> [l2|ip] [seed]`: it loads ONE clean index, sweeps
+ALL policies × fractions internally (`set_fault_injection` only marks a fraction of vectors
+corrupt in an in-memory bitmap — it does NOT flip bytes), and prints a CSV. It takes no
+policy/fraction/out_path/k/ef argument and emits no `RECALL` line. And EB ranking needs query-time
+quantities (`est_dist`, `g_error`) computed inside the C++ search, which do not exist in Python —
+so `qp.rabitq.eb_policy.eb_rank_dist` is only a documented formula reference, not a runnable Python
+recovery path.
 
-**Option A (this implementation — approximate)**:
-Pass the CLEAN index path to `exp_faultinject` with the same `fraction` and `seed` as E3c used.
-The corruption is not byte-identical to E3c's accumulation, but the EB recall improvement
-statistics are comparable at the same error rate. Sufficient for Experiment B's sensitivity study.
-Document the approximation in `artifacts/phase3/provenance/`.
+**Current behaviour — REPORT-AND-STOP (honest)**: `adapter.search_with_eb_fallback(...)` now
+**raises** rather than faking it. (The earlier "Option A" wrapper was coded against a hypothetical
+patched binary and would have double-corrupted: it fed the already-corrupted index to
+`exp_faultinject`, which then injected MORE faults.) On x86, rotation/cliff experiments are
+unaffected (they never call the EB path); ex/slope experiments stop here until Option B is built.
+The stub adapter keeps a working `search_with_eb_fallback` (tagging `_eb_path=True`) so dev-machine
+branch-coverage tests still exercise the slope EB branch.
 
-**Option B (exact — requires C++ build)**:
-Patch `exp_dumpids` to add `--recovery fallback_eb` mode. This lets E5 serialize the
-pre-corrupted buffer to a temp file and run the EB policy directly on it.
-Requires a workstation build patch; defer unless Option A's approximation proves insufficient.
-
-**Current default**: Option A. To use it, pass the CLEAN index path as `index_path` in
-`adapter.search_with_eb_fallback(clean_index_path, eb_fraction, seed)`.
+**Option B (the path forward — requires C++ build)**:
+Patch `exp_dumpids` to add a `--recovery fallback_eb` mode so E5 can serialize the pre-corrupted
+buffer to a temp file and run the EB policy directly on it. This is a workstation build patch and
+is the human decision recorded in `artifacts/phase3/plan/stage2_plan1.md` when Experiment B runs.
 
 ---
 

@@ -67,9 +67,15 @@ class TemporalCorruptor:
         self._byte_len = int(region[1])
         self._n_bits = self._byte_len * 8
         self._cfg = cfg
-        self._dirty_bits = set()   # region-relative bit offsets currently corrupted (XOR state)
+        self._dirty_bits = set()   # region-relative bit offsets toggled (used by inject-only tests)
         self._tick = 0
         self._curve = []           # cumulative bit count per tick
+        # Clean baseline + live buffer reference, captured on the first inject_step. The metric
+        # is computed as popcount(buf[region] XOR clean) so it stays correct even when ANOTHER
+        # writer (e.g. the E5 cliff/slope repair) mutates buf in place — the §5 plan defines
+        # cumulative corruption as "bits currently differing from clean", not internal bookkeeping.
+        self._clean_region = None
+        self._buf = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -84,26 +90,38 @@ class TemporalCorruptor:
         """
         if pattern not in PATTERNS:
             raise ValueError(f"unknown pattern {pattern!r}; choose from {PATTERNS}")
+        if self._clean_region is None:                  # snapshot clean baseline + buf ref once
+            bs, bl = self._byte_start, self._byte_len
+            self._clean_region = np.array(buf[bs:bs + bl], dtype=np.uint8)
+            self._buf = buf
         positions = self._sample_positions(pattern, seed)
         self._toggle(buf, positions)
         self._tick += 1
-        self._curve.append(len(self._dirty_bits))
+        self._curve.append(self._corrupt_bit_count())
         return positions
 
+    def _corrupt_bit_count(self):
+        """Physical corruption: region bits in buf that currently differ from the clean baseline."""
+        if self._clean_region is None or self._buf is None:
+            return 0
+        bs, bl = self._byte_start, self._byte_len
+        diff = np.asarray(self._buf[bs:bs + bl], dtype=np.uint8) ^ self._clean_region
+        return int(np.unpackbits(diff).sum())
+
     def cumulative_corruption(self):
-        """Current accumulation state: bits currently corrupted (physical XOR count)."""
+        """Current accumulation state: bits in buf currently differing from clean (physical XOR)."""
+        bits = self._corrupt_bit_count()
         return {
-            "bits_flipped": len(self._dirty_bits),
-            "fraction": len(self._dirty_bits) / self._n_bits if self._n_bits else 0.0,
+            "bits_flipped": bits,
+            "fraction": bits / self._n_bits if self._n_bits else 0.0,
             "tick": self._tick,
         }
 
     def reset(self, buf):
         """Restore buf to clean state and clear accumulator (models a full scrub)."""
-        for rel_off in self._dirty_bits:
-            byte_abs = self._byte_start + rel_off // 8
-            bit = rel_off % 8
-            buf[byte_abs] ^= (1 << bit)
+        if self._clean_region is not None:
+            bs, bl = self._byte_start, self._byte_len
+            buf[bs:bs + bl] = self._clean_region    # robust even if buf was externally modified
         self._dirty_bits.clear()
         self._tick = 0
         self._curve.clear()
@@ -171,17 +189,22 @@ class TemporalCorruptor:
 # ---------------------------------------------------------------------------
 
 def _resolve_region(rmap, region_name):
-    """Extract (byte_start, byte_len) for a named region from the serialized region map."""
+    """Resolve a region name to (byte_start, byte_len).
+
+    Per-vector fields (ex_code, bin_factors, ...) resolve to ELEMENT 0 — the representative
+    convention shared with E3a/E3b's structure_region. Globals (rotation/centroids/header)
+    resolve to their single region. Callers label per-vector records '<field>@elem0' (see
+    region_label) so the per-element scope is explicit rather than mislabeled as the structure.
+    """
     for r in rmap["regions"]:
         if layout.base_name(r["name"]) == region_name and r.get("byte_start") is not None:
             return (int(r["byte_start"]), int(r["byte_len"]))
-    # Per-element region: sum all element offsets (aggregate)
-    agg = layout.aggregate_region_map(rmap)
-    if region_name in agg:
-        raise ValueError(
-            f"region {region_name!r} is per-element (no single byte_start); "
-            f"use a global region like 'rotation' for E3c timeline experiments.")
     raise KeyError(f"region {region_name!r} not found in region map")
+
+
+def region_label(region_name):
+    """Honest display/file label: per-vector fields are element-0 representatives."""
+    return f"{region_name}@elem0" if region_name in layout.PER_VECTOR_FIELDS else region_name
 
 
 def run(args):
@@ -192,11 +215,12 @@ def run(args):
         cfg["p"] = float(args.p)
     cfg["region"] = args.region
     cfg["seed"] = args.seed
+    rlabel = region_label(cfg["region"])
 
     out_dir = os.path.join(config.ROOT, "artifacts_smoke" if args.smoke else "artifacts",
                            "phase3", "e3c")
     os.makedirs(out_dir, exist_ok=True)
-    raw_path = os.path.join(out_dir, f"e3c_{args.pattern}_{args.region}.records.jsonl")
+    raw_path = os.path.join(out_dir, f"e3c_{args.pattern}_{rlabel}.records.jsonl")
 
     adapter = get_adapter(args.adapter)
     aname = adapter_name(adapter)
@@ -208,7 +232,7 @@ def run(args):
     corruptor = TemporalCorruptor(region, cfg)
 
     records = []
-    print(f"[e3c] adapter={aname} region={cfg['region']} pattern={args.pattern} "
+    print(f"[e3c] adapter={aname} region={rlabel} pattern={args.pattern} "
           f"ticks={cfg['ticks']}")
 
     with open(raw_path, "w") as raw_f:
@@ -218,7 +242,7 @@ def run(args):
             cc = corruptor.cumulative_corruption()
             row = {"tick": tick, "positions_this_tick": len(positions),
                    "cumulative_corruption": cc, "pattern": args.pattern,
-                   "region": cfg["region"], "adapter": aname}
+                   "region": rlabel, "adapter": aname}
             raw_f.write(json.dumps(row) + "\n")
             records.append(row)
             if tick % 10 == 0 or tick == cfg["ticks"] - 1:
@@ -234,14 +258,14 @@ def run(args):
 
     summary = {
         "pattern": args.pattern,
-        "region": cfg["region"],
+        "region": rlabel,
         "ticks": cfg["ticks"],
         "final_bits_flipped": records[-1]["cumulative_corruption"]["bits_flipped"],
         "final_fraction": records[-1]["cumulative_corruption"]["fraction"],
         "adapter": aname,
         "cfg": cfg,
     }
-    out_json = os.path.join(out_dir, f"e3c_{args.pattern}_{args.region}.json")
+    out_json = os.path.join(out_dir, f"e3c_{args.pattern}_{rlabel}.json")
     with open(out_json, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"[e3c] done → {out_json}")

@@ -47,17 +47,6 @@ def _rot_region(rmap=None):
     return _resolve_region(rmap, "rotation")
 
 
-def _ex_region_for_test(rmap=None):
-    """Return (byte_start, byte_len) of the ex_code data for element 0 (16-byte window for tests)."""
-    rmap = rmap or _rmap()
-    # Use element 0's ex_code as a small test region
-    try:
-        bs, bl = layout.element_field_range(rmap, "ex_code", 0)
-        return (bs, bl)
-    except KeyError:
-        return None
-
-
 def _guard(rmap=None, cfg=None):
     rmap = rmap or _rmap()
     cfg = cfg or {**E5_SMOKE_CFG, "chunk_size": 16, "reload_threshold": 0.5}
@@ -250,6 +239,36 @@ class TestE3cClusteredVsUniform:
             f"clustered density {c_density} should be >= uniform density {u_density}")
 
 
+class TestE3cRecoveryDesync:
+    """Regression (#1): cumulative_corruption() must track the real buffer, not stale bookkeeping,
+    even when ANOTHER writer (E5 cliff/slope repair) cleans the shared buf in place."""
+
+    def test_cumulative_corruption_tracks_external_repair(self):
+        rmap = _rmap()
+        region = _rot_region(rmap)
+        bs, bl = region
+        clean = _clean()
+        buf = clean.copy()
+        corr = TemporalCorruptor(region, {"p": 0.5})
+
+        def true_count():
+            return int(np.unpackbits(buf[bs:bs + bl] ^ clean[bs:bs + bl]).sum())
+
+        corr.inject_step(buf, "uniform_accum", seed=42)
+        assert corr.cumulative_corruption()["bits_flipped"] == true_count() > 0
+
+        # Simulate an E5 cliff repair: clean the rotation region in place, behind E3c's back.
+        buf[bs:bs + bl] = clean[bs:bs + bl]
+        assert true_count() == 0
+        assert corr.cumulative_corruption()["bits_flipped"] == 0, (
+            "metric must reflect the externally-repaired buffer, not internal _dirty_bits")
+
+        # Re-inject the SAME seed (the old code would report 0 while re-corrupting the buffer).
+        corr.inject_step(buf, "uniform_accum", seed=42)
+        assert corr.cumulative_corruption()["bits_flipped"] == true_count() > 0, (
+            "after re-injection the metric must match popcount(buf XOR clean), not desync to 0")
+
+
 # ---------------------------------------------------------------------------
 # E5 cliff tests
 # ---------------------------------------------------------------------------
@@ -297,6 +316,22 @@ class TestE5Cliff:
         assert self.guard._cliff_irrecoverable >= 1, (
             "Should detect that majority-vote result fails clean CRC "
             "(2 of 3 copies corrupted the same way)")
+
+    def test_irrecoverable_does_not_poison_buf(self):
+        """Regression (#7): on irrecoverable, the wrong majority is NOT written into buf."""
+        bs, bl = self.guard._rot_region
+        buf = self.clean_buf.copy()
+        # 2 of 3 copies wrong at the same bit -> majority is wrong -> irrecoverable.
+        self.guard._rot_copies[0][0] ^= 0b00000001
+        self.guard._rot_copies[1][0] ^= 0b00000001
+
+        self.guard._scrub_cliff(buf)
+
+        assert self.guard._cliff_irrecoverable >= 1
+        # buf (which was clean) must be left untouched, NOT overwritten with the corrupt majority.
+        assert np.array_equal(buf[bs:bs + bl], self.clean_buf[bs:bs + bl]), (
+            "irrecoverable scrub must not serve the wrong majority into buf")
+        assert self.guard._cliff_repaired == 0, "no repair should be counted when irrecoverable"
 
     def test_cliff_no_change_on_pristine_buf(self):
         """Clean buf + clean copies → no repairs, no irrecoverable, cliff_repaired == 0."""
@@ -454,6 +489,30 @@ class TestE5Slope:
         assert np.array_equal(buf[exs:exs + exl], self.clean[exs:exs + exl]), (
             "reload must restore ex bytes to clean")
 
+    def test_ex_region_is_element0_only(self):
+        """Regression (#5): the slope region is elem0.ex_code, NOT a ~99%-of-level0 span."""
+        if self.guard._ex_region is None:
+            pytest.skip("stub has no ex region")
+        expected = layout.element_field_range(self.rmap, "ex_code", 0)
+        assert self.guard._ex_region == expected, (
+            f"ex_region {self.guard._ex_region} must equal elem0 ex_code {expected}")
+        level0 = next(r for r in self.rmap["regions"] if r["name"] == "level0")
+        assert self.guard._ex_region[1] < level0["byte_len"] // 2, (
+            "ex_region must be a small per-vector slice, not most of level0")
+
+    def test_slope_failed_counts_distinct_events(self):
+        """Regression (#8): a persistently-corrupted chunk counts once across repeated checks."""
+        if self.guard._ex_region is None:
+            pytest.skip("stub has no ex region")
+        buf = self.clean.copy()
+        self._corrupt_ex_chunk(buf, 0)
+        for _ in range(3):                       # same corruption checked three times
+            self.guard._check_ex_crc(buf)
+        ctr = self.guard.counters()
+        assert ctr["slope_failed"] == 1, (
+            f"persistent corruption must count as one failure event, got {ctr['slope_failed']}")
+        assert ctr["known_corrupted"] == 1
+
 
 class TestE5SlopeParity:
     def setup_method(self):
@@ -466,7 +525,7 @@ class TestE5SlopeParity:
         self.guard.init_from_clean(self.clean)
 
     def test_parity_on_single_bit_repair(self):
-        """1-byte flip in a small chunk: parity repair succeeds, slope_failed stays 0."""
+        """1-byte flip in a small (<=64 B) chunk: parity repair succeeds and restores the byte."""
         if self.guard._ex_region is None:
             pytest.skip("stub has no ex region")
         if not self.guard._parity_bytes:
@@ -475,16 +534,15 @@ class TestE5SlopeParity:
         if exl < 1:
             pytest.skip("ex region too small")
         buf = self.clean.copy()
-        # Flip exactly 1 byte in chunk 0 (XOR with 0xFF changes that byte)
-        buf[exs] ^= 0x08   # 1-bit flip (only 1 bit, not the whole byte)
+        # Flip exactly 1 bit in chunk 0. Clean stub chunk is all-zero, so actual_p=0x08 != 0,
+        # diff_p=0x08, and the brute-force single-byte correction deterministically restores it.
+        buf[exs] ^= 0x08
         self.guard._check_ex_crc(buf)
         ctr = self.guard.counters()
-        # Parity should repair it: slope_failed == 0
-        # Note: chunk_size=16 so parity repair is attempted for small chunks
-        # The repair may or may not succeed depending on the XOR algebra; if it succeeds, failed=0
-        # If it doesn't (XOR parity can't always locate), failed=1 (EB-fallback triggered)
-        # We only assert: no exception, counter is valid
-        assert isinstance(ctr["slope_failed"], int)
+        assert ctr["slope_failed"] == 0, (
+            "deterministic single-bit flip in a small chunk must be parity-repaired, not escalated")
+        assert ctr["known_corrupted"] == 0, "parity-repaired chunk must not stay in known_corrupted"
+        assert buf[exs] == self.clean[exs], "parity repair must restore the byte to clean"
 
     def test_parity_on_multi_bit_fallback(self):
         """Multi-byte corruption: parity cannot repair → slope_failed >= 1."""
@@ -511,8 +569,8 @@ class TestE5SlopeParity:
 # ---------------------------------------------------------------------------
 
 class TestE5BoundsCheck:
-    def test_oob_pointer_no_crash(self):
-        """OOB pointer in links region → oob_elements >= 1, no exception, recall not None."""
+    def test_oob_pointer_detected_and_no_crash(self):
+        """OOB link id (even with count==0) → detected, field restored from clean, no crash."""
         rmap = _rmap()
         cfg = {**E5_SMOKE_CFG, "chunk_size": 16, "bounds_sample": 4}
         guard = RecoveryGuard(adapter, cfg, rmap)
@@ -520,32 +578,29 @@ class TestE5BoundsCheck:
         guard.init_from_clean(clean)
 
         buf = clean.copy()
-        # Corrupt the links region of element 0 (pointer high byte → stub maps to crash)
-        # The bounds-check layer should detect and skip before the binary crashes
         try:
             bs_links, bl_links = layout.element_field_range(rmap, "links", 0)
         except KeyError:
             pytest.skip("no links region in stub rmap")
+        if bl_links < 8:
+            pytest.skip("links region too small")
 
-        # Write an OOB link id (value > cur_element_count=64)
-        # High bytes (offset %4 in {2,3}) per stub_adapter._is_pointer_high
-        # Write a large value in bytes 2-3 of the first link slot (after the 4-byte count)
-        if bl_links >= 8:
-            buf[bs_links + 6] = 0xFF   # high byte of first link id
-            buf[bs_links + 7] = 0xFF
+        # Write an OOB link id (high bytes of the first slot) while leaving count==0 in the
+        # pristine stub. The fixed-window scan must still find it, and restore-from-clean must
+        # prevent the stub's high-byte-pointer crash.
+        buf[bs_links + 6] = 0xFF
+        buf[bs_links + 7] = 0xFF
 
         with tempfile.NamedTemporaryFile(suffix=".index", delete=False) as f:
             tmp = f.name
         try:
-            # Should not raise, should record OOB
-            try:
-                res = guard.search_with_recovery(buf, tmp)
-            except Exception:
-                # The stub may still raise CalledProcessError for high-byte pointer
-                # The bounds-check DETECTION is what matters; crash is expected on stub
-                pass
-            # Key assertion: no unhandled Python exception escaped, and oob counter reflects detect
-            assert guard._oob_elements >= 0   # at minimum no exception
+            res = guard.search_with_recovery(buf, tmp)   # must NOT raise now
+            assert guard._oob_elements >= 1, "OOB link id must be detected despite count==0"
+            assert res.get("ids") is not None, "search must return after OOB restore (no crash)"
+            # The corrupted links field must have been restored to clean.
+            assert np.array_equal(buf[bs_links:bs_links + bl_links],
+                                  clean[bs_links:bs_links + bl_links]), \
+                "OOB field must be restored from the clean snapshot"
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)

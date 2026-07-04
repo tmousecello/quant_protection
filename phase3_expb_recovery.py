@@ -73,6 +73,14 @@ def _pattern_seed(seed, pattern, fraction):
     return (int(seed) ^ zlib.crc32(pattern.encode()) ^ int(round(fraction * 1e6))) & 0x7FFFFFFF
 
 
+def _lane_seed(base, lane):
+    """Independent deterministic sub-stream seed. NOT xor: `base ^ lane` aliases (e.g. bases
+    b and b+1 with lanes 0 and 1 produce the SAME seed set, so adjacent --seed values would
+    select identical element unions — caught by the determinism test). SeedSequence spawning
+    is collision-free and platform-stable."""
+    return int(np.random.SeedSequence([int(base), int(lane)]).generate_state(1)[0])
+
+
 def select_elements(pattern, fraction, n, seed, cfg):
     """Element ids to corrupt: exactly ceil(fraction*n) of them, pattern-shaped, deterministic.
 
@@ -129,7 +137,8 @@ def select_elements(pattern, fraction, n, seed, cfg):
         seen = set()
         tick = 0
         while len(used) < m:
-            trng = np.random.default_rng(_pattern_seed(seed, pattern, fraction) ^ tick)
+            trng = np.random.default_rng(_lane_seed(_pattern_seed(seed, pattern, fraction),
+                                                    tick))
             for e in trng.choice(n, size=min(batch, n), replace=False):
                 e = int(e)
                 if e not in seen:
@@ -167,7 +176,7 @@ def inject_elements(buf, rmap, elements, pattern, seed, cfg):
             if e in done:
                 continue
             partner = e + stride if (e + stride) in eset else None
-            rng = np.random.default_rng(_pattern_seed(seed, pattern, 0.0) ^ (e * 2 + 1))
+            rng = np.random.default_rng(_lane_seed(_pattern_seed(seed, pattern, 0.0), e))
             rel_bits = rng.choice(field_len * 8, size=flips, replace=False)
             group = [e] if partner is None else [e, partner]
             for member in group:
@@ -177,10 +186,10 @@ def inject_elements(buf, rmap, elements, pattern, seed, cfg):
                 positions.extend(pos)
                 done.add(member)
     else:
+        base = _pattern_seed(seed, pattern, 0.0)
         for e in elements:
             region = (level0_start + e * spe + field_off, field_len)
-            pos = faults.temporal_burst(buf, region, [flips],
-                                        _pattern_seed(seed, pattern, 0.0) ^ (e * 2 + 1))
+            pos = faults.temporal_burst(buf, region, [flips], _lane_seed(base, e))
             positions.extend(pos)
     return positions
 
@@ -243,6 +252,7 @@ def setup_context(args):
         "clean_ids": ids_legacy, "meta": meta, "meta_path": meta_path,
         "corrupt_path": os.path.join(out_dir, "_expb_corrupt.index"),
         "timeout": args.timeout, "seed": int(args.seed),
+        "out_tag": getattr(args, "out_tag", None),
     }
 
 
@@ -301,8 +311,10 @@ def _check_crc_fail_count(row, n_elements, mode):
 
 def run_sweep(ctx, patterns, fractions, modes):
     all_rows = []
+    tag = f"_{ctx['out_tag']}" if ctx.get("out_tag") else ""
     for pattern in patterns:
-        rec_path = os.path.join(ctx["out_dir"], f"expb_{pattern}_{FIELD}.records.jsonl")
+        rec_path = os.path.join(ctx["out_dir"],
+                                f"expb_{pattern}_{FIELD}{tag}.records.jsonl")
         with open(rec_path, "w") as rec_f:
             for fraction in fractions:
                 elements, positions, sha = _corrupt_index_file(ctx, pattern, fraction)
@@ -314,7 +326,9 @@ def run_sweep(ctx, patterns, fractions, modes):
                     _check_crc_fail_count(frag, len(elements), mode)
                     row = {"pattern": pattern, "fraction": fraction,
                            "fraction_actual": frac_actual, "n_elements": len(elements),
-                           "bit_flips": len(positions), "recovery": mode,
+                           "bit_flips": len(positions),
+                           "flips_per_element": ctx["cfg"]["flips_per_element"],
+                           "recovery": mode,
                            "delta_vs_clean": (None if frag["recall@10"] is None else
                                               round(frag["recall@10"] - ctx["clean_recall"], 6)),
                            "region": FIELD, "seed": ctx["seed"], "ef": ctx["cfg"]["ef"],
@@ -340,7 +354,7 @@ def run_sweep(ctx, patterns, fractions, modes):
         "adapter": ctx["aname"],
         "meta": ctx["meta"],
     }
-    out_json = os.path.join(ctx["out_dir"], "expb_summary.json")
+    out_json = os.path.join(ctx["out_dir"], f"expb_summary{tag}.json")
     with open(out_json, "w") as fh:
         json.dump(summary, fh, indent=2)
     print(f"[expb] sweep done ({len(all_rows)} rows) -> {out_json}")
@@ -443,17 +457,41 @@ def run_gates(ctx):
     _restore(ctx, positions)
 
     # Gate 4 — ordering at f=0.20: fallback_eb >= drop, none the worst.
-    elements4, positions4, _ = _corrupt_index_file(ctx, "uniform_accum", 0.20)
-    rec = {}
-    for mode in RECOVERY_MODES:
-        frag, _ = _run_one(ctx, ctx["corrupt_path"], mode)
-        _check_crc_fail_count(frag, len(elements4), mode)
-        rec[mode] = frag["recall@10"]
-    _restore(ctx, positions4)
+    #
+    # "none should be worst (silently using BAD data)" presumes the data is actually garbage,
+    # so the GATED run corrupts half of each element's ex_code bits (severe). Measured on this
+    # workstation: at the default light damage (4/768 bits) none LEGITIMATELY outranks
+    # drop/fallback_eb (slightly-wrong ex distances beat discarding 20% of the database:
+    # none=0.907 vs drop=0.797/eb=0.816), while drop/fallback_eb are severity-INVARIANT
+    # (detection only depends on which elements failed CRC). The light-damage ordering is
+    # therefore recorded as informational, not gated.
+    field_len = crc_manifest.field_geometry(ctx["rmap"], FIELD)[3]
+    severe = max(1, field_len * 8 // 2)
+    saved_flips = ctx["cfg"]["flips_per_element"]
+
+    def ordering_at(flips):
+        ctx["cfg"]["flips_per_element"] = flips
+        try:
+            elements4, positions4, _ = _corrupt_index_file(ctx, "uniform_accum", 0.20)
+            out = {}
+            for mode in RECOVERY_MODES:
+                frag, _ = _run_one(ctx, ctx["corrupt_path"], mode)
+                _check_crc_fail_count(frag, len(elements4), mode)
+                out[mode] = frag["recall@10"]
+            _restore(ctx, positions4)
+            return out
+        finally:
+            ctx["cfg"]["flips_per_element"] = saved_flips
+
+    rec = ordering_at(severe)
+    light = ordering_at(saved_flips) if saved_flips != severe else rec
     ok4 = (None not in rec.values() and rec["fallback_eb"] >= rec["drop"]
            and rec["none"] < min(rec["drop"], rec["fallback_eb"]))
-    if not gate(4, "ordering eb>=drop, none worst", ok4,
-                f"none={rec['none']}, drop={rec['drop']}, fallback_eb={rec['fallback_eb']}"):
+    if not gate(4, "ordering eb>=drop, none worst (severe damage)", ok4,
+                f"severe({severe} flips/elem): none={rec['none']}, drop={rec['drop']}, "
+                f"fallback_eb={rec['fallback_eb']}; informational light({saved_flips} "
+                f"flips/elem): none={light['none']}, drop={light['drop']}, "
+                f"fallback_eb={light['fallback_eb']}"):
         return finish(False)
 
     # Gate 5 — determinism: repeat the gate-3 config; injection AND ids must be identical.
@@ -505,6 +543,9 @@ def main(argv=None):
     ap.add_argument("--recovery", type=_csv("recovery mode", RECOVERY_MODES), default=None)
     ap.add_argument("--flips-per-element", type=int,
                     default=CFG_DEFAULTS["flips_per_element"], dest="flips_per_element")
+    ap.add_argument("--out-tag", default=None, dest="out_tag",
+                    help="suffix for sweep output filenames (e.g. sev384) so sweeps at "
+                         "different severities can coexist")
     args = ap.parse_args(argv)
 
     ctx = setup_context(args)

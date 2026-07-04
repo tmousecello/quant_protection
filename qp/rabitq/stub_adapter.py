@@ -229,20 +229,101 @@ def _recall(ids, gt, k):
     return metrics.recall_at_k(ids, gt, k)
 
 
-def search_with_eb_fallback(index_path, fraction, seed=0, *, k=None, ef=2000, out_path=None,
-                            query_f=None, gt_f=None, timeout=None):
-    """Stub stand-in for the EB-fallback search path (E5 slope layer).
+def search_with_eb_fallback(index_path, fraction, seed=0, *, crc_manifest=None, k=None,
+                            ef=2000, out_path=None, query_f=None, gt_f=None, timeout=None):
+    """Stub stand-in for the EB-fallback search path (E5 slope layer / Option B).
 
-    Accepts a file path (same signature as the real adapter's search_with_eb_fallback).
-    Delegates to search_corrupted and tags result with _eb_path=True so unit tests can
-    assert the EB branch was taken. The scientific EB recall improvement is only measurable
-    on x86 with the real binary; stub returns the same deterministic outcome.
+    Same signature as the real adapter. With `crc_manifest` it routes through the Option-B
+    query_with_recovery (real manifest verification, fake recall); without one it keeps the
+    legacy stub behavior (delegate to search_corrupted) so pre-Option-B E5 stub tests are
+    unchanged. Tags _eb_path=True so unit tests can assert the EB branch was taken.
     """
-    res = search_corrupted(index_path, k=k, ef=ef, out_path=out_path,
-                           query_f=query_f, gt_f=gt_f, timeout=timeout)
+    if crc_manifest:
+        res = query_with_recovery(index_path, "fallback_eb", crc_manifest, k=k, ef=ef,
+                                  out_path=out_path, query_f=query_f, gt_f=gt_f,
+                                  timeout=timeout)
+        res["distances"] = None
+    else:
+        res = search_corrupted(index_path, k=k, ef=ef, out_path=out_path,
+                               query_f=query_f, gt_f=gt_f, timeout=timeout)
     res["_eb_path"] = True
     res["eb_fraction"] = float(fraction)
     return res
+
+
+# --- Option B: recovery-mode query (real CRC verification, FAKE recall model) -----------------
+
+RECOVERY_MODES = ("none", "drop", "fallback_eb")
+
+# recall-retention slopes per recovery mode as a function of the corrupted-element fraction f.
+# CHOSEN, not measured: they exist only so the driver's gate/sweep plumbing has a deterministic
+# outcome with the structurally-correct ordering (fallback_eb >= drop > none for f>0; all equal
+# clean at f=0). NOTHING here is a scientific measurement.
+_RECOVERY_SLOPE = {"none": 1.5, "drop": 0.6, "fallback_eb": 0.45}
+
+
+def _corrupt_ex_elements(buf):
+    """Element indices whose ex_code bytes differ from the pristine buffer (stub ground truth)."""
+    rmap = region_map()
+    hdr = rmap["header"]
+    n, spe = hdr["cur_element_count"], hdr["size_data_per_element"]
+    s0, flen = layout.element_field_range(rmap, "ex_code", 0)
+    changed = np.nonzero(buf != _PRISTINE)[0]
+    out = set()
+    for off in changed:
+        d, r = divmod(int(off) - s0, spe)
+        if 0 <= d < n and 0 <= r < flen:
+            out.add(int(d))
+    return sorted(out)
+
+
+def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=None, ef=2000,
+                        out_path=None, stats_json=None, query_f=None, gt_f=None, timeout=None):
+    """Deterministic stand-in for exp_dumpids --recovery (same contract as the real adapter).
+
+    The CRC side is REAL: with a manifest, the failing-element set comes from
+    qp.rabitq.crc_manifest.verify_buffer on the actual file bytes (so manifest format,
+    geometry echo, and verification code paths are genuinely exercised offline); recovery=none
+    diffs against the pristine buffer instead (no CRC check, mirroring the C++ none mode).
+    Only the fraction -> recall mapping is a documented fake (_RECOVERY_SLOPE).
+    """
+    from qp.rabitq import crc_manifest as cm
+
+    k = config.K if k is None else int(k)
+    if recovery not in RECOVERY_MODES:
+        raise ValueError(f"recovery must be one of {RECOVERY_MODES}, got {recovery!r}")
+    if recovery != "none" and not crc_manifest:
+        raise ValueError(f"--recovery {recovery} requires a crc_manifest path")
+    gt = load_groundtruth()
+    buf = np.fromfile(index_path, dtype=np.uint8)
+
+    if recovery == "none":
+        failing = _corrupt_ex_elements(buf)
+        checked = 0                       # none mode never CRC-checks (spec rule 4)
+    else:
+        manifest = cm.read_manifest(crc_manifest)
+        failing = cm.verify_buffer(buf, manifest)
+        checked = int(manifest["header"]["n_entries"])
+
+    n = int(region_map()["header"]["cur_element_count"])
+    frac = len(failing) / n if n else 0.0
+    recall = max(0.05, CLEAN_RECALL * (1.0 - _RECOVERY_SLOPE[recovery] * frac))
+    ids = _ids_for_recall(recall, gt, k)
+    per_hit = len(failing)                # deterministic fake counter model
+    stats = {
+        "recovery": recovery, "crc_manifest": crc_manifest or "", "ef": int(ef), "topk": k,
+        "nq": NQ,
+        "load": {"elements_checked": checked,
+                 "elements_crc_fail": len(failing) if recovery != "none" else 0},
+        "totals": {"consults": n * NQ if recovery != "none" else 0,
+                   "corrupt_hits": per_hit * NQ if recovery != "none" else 0,
+                   "fallbacks": per_hit * NQ if recovery == "fallback_eb" else 0,
+                   "drops": per_hit * NQ if recovery == "drop" else 0},
+        "per_query": None,
+        "_stub": True,
+    }
+    return {"ids": ids, "cpp_recall": float(np.round(_recall(ids, gt, k), 12)),
+            "stats": stats}
 
 
 def _distances(ids, finite):

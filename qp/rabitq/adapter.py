@@ -36,6 +36,11 @@ METRIC = "l2"
 BINARIES = ("hnsw_rabitq_indexing", "hnsw_rabitq_querying", "exp_faultinject",
             "exp_fieldflip", "exp_dumpids")
 
+# Option B recovery modes (stage2_cpp_patch.md rule 4). none = no CRC check, possibly-bad ex
+# used as-is; drop = CRC fail -> skip candidate; fallback_eb = CRC fail -> bin + error-bound
+# pessimistic rank (Samuel exp-3 semantics, computed in C++).
+RECOVERY_MODES = ("none", "drop", "fallback_eb")
+
 # Documented anchor for golden comparison (results/datasets/sift/ladder.csv plateau, b=7).
 # This is a REFERENCE constant, never returned as if it were a fresh measurement.
 EXPECTED_CLEAN_RECALL10 = 0.983
@@ -182,34 +187,82 @@ def query_ids(index_path=None, k=None, ef=2000, out_path=None, query_f=None, gt_
     return ids, cpp_recall
 
 
-def search_with_eb_fallback(index_path, fraction, seed=0, *, k=None, ef=2000,
-                            out_path=None, query_f=None, gt_f=None, timeout=None):
-    """REPORT-AND-STOP: pre-corrupted EB-fallback ranking is not available on current binaries.
+def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=None, ef=2000,
+                        out_path=None, stats_json=None, query_f=None, gt_f=None, timeout=None):
+    """Run the Option-B exp_dumpids with query-time CRC recovery (stage2_cpp_patch.md §2a).
 
-    The E5 slope layer wants to re-rank an ALREADY-corrupted index with Samuel's EB policy
-    (protected bin + error bound, hnsw.hpp FAULT_FALLBACK_EB). That cannot be done with the
-    binaries build_rabitq.sh produces, so this path stops loudly instead of faking it:
+    `index_path` is a (possibly already-corrupted BY PYTHON) index file; `crc_manifest` is the
+    qp.rabitq.crc_manifest file written from the CLEAN index BEFORE injection. The C++ side
+    only compares CRCs and applies Samuel's exp-3 policy — it never injects (hard rule #1) and
+    its RECALL stdout line is parity-only; recompute the authoritative recall from the returned
+    ids with qp.metrics (hard rule #2).
 
-      * The real exp_faultinject CLI is `<index> <query> <gt> [l2|ip] [seed]`. It loads ONE
-        CLEAN index, sweeps ALL policies × fractions internally (set_fault_injection just marks
-        a fraction of vectors corrupt in an in-memory bitmap — it does NOT flip bytes), and
-        prints a CSV. It takes no policy/fraction/out_path/k/ef arg and emits no RECALL line, so
-        it cannot rank a caller-supplied corrupted buffer. (The previous Option-A wrapper here
-        was coded against a hypothetical patched binary and would have double-corrupted: it fed
-        the already-corrupted index to exp_faultinject, which then injected MORE faults.)
-      * EB ranking needs query-time quantities (est_dist, g_error) computed inside the C++
-        search; they do not exist in Python, so qp.rabitq.eb_policy.eb_rank_dist is only a
-        documented formula reference, not a runnable Python recovery path.
-
-    True pre-corrupted EB requires Option B: patch exp_dumpids with a `--recovery fallback_eb`
-    mode (workstation/C++ work). Until then, raise. See artifacts/phase3/E5_RUNBOOK.md.
+    Returns {"ids": (nq,k) int32 (-1 pads), "cpp_recall": float, "stats": dict|None} where
+    `stats` is the binary's stats json (load-time CRC scan totals + per-query counters).
+    Subprocess crash/timeout propagate as CalledProcessError / TimeoutExpired for the runner
+    to record as `crash`.
     """
-    raise RuntimeError(
-        "REPORT-AND-STOP: pre-corrupted EB-fallback ranking needs the Option-B C++ patch "
-        "(exp_dumpids --recovery fallback_eb); the current exp_faultinject binary cannot rank a "
-        "supplied corrupted index (its CLI is <index> <query> <gt> [l2|ip] [seed], sweeps "
-        "internally, prints CSV). See E5_RUNBOOK.md. "
-        f"(index_path={index_path!r}, fraction={fraction!r}, seed={seed!r})")
+    import json
+
+    _require_binaries()
+    if recovery not in RECOVERY_MODES:
+        raise ValueError(f"recovery must be one of {RECOVERY_MODES}, got {recovery!r}")
+    if recovery != "none" and not crc_manifest:
+        raise ValueError(f"--recovery {recovery} requires a crc_manifest path")
+    k = config.K if k is None else int(k)
+    query_f = query_f or os.path.join(PREP, "query.fvecs")
+    gt_f = gt_f or os.path.join(PREP, "groundtruth.ivecs")
+    out_path = out_path or os.path.join(PREP, f"_dumpids_{recovery}_ef{int(ef)}_k{k}.ivecs")
+    stats_json = stats_json or out_path + ".stats.json"
+    cmd = [os.path.join(BIN, "exp_dumpids"), index_path, query_f, gt_f, METRIC,
+           str(int(ef)), out_path, str(k),
+           "--recovery", recovery, "--stats-json", stats_json]
+    if recovery != "none":
+        cmd += ["--crc-manifest", crc_manifest]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
+    cpp_recall = None
+    for line in res.stdout.splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) == 2 and parts[0] == "RECALL":
+            cpp_recall = float(parts[1])
+    if cpp_recall is None:
+        raise RuntimeError(f"exp_dumpids did not print a RECALL line; stdout:\n{res.stdout}")
+    ids = read_ivecs(out_path)
+    stats = None
+    if os.path.isfile(stats_json):
+        with open(stats_json) as fh:
+            stats = json.load(fh)
+    return {"ids": ids, "cpp_recall": cpp_recall, "stats": stats}
+
+
+def search_with_eb_fallback(index_path, fraction, seed=0, *, crc_manifest=None, k=None,
+                            ef=2000, out_path=None, query_f=None, gt_f=None, timeout=None):
+    """EB-fallback search of an ALREADY-corrupted index (E5 slope layer contract).
+
+    Requires `crc_manifest` — the qp-written CRC manifest of the CLEAN index (Option B). With
+    it, delegates to query_with_recovery(..., "fallback_eb"): the patched exp_dumpids CRC-scans
+    the loaded bytes and ranks CRC-failed candidates by Samuel's pessimistic error bound
+    (est + (est - low), hnsw.hpp exp-3 code path, unchanged). `fraction`/`seed` are the
+    CALLER's injection metadata, recorded for the result row only — nothing here injects or
+    simulates (the earlier Option-A wrapper double-corrupted and was removed; the exp_faultinject
+    binary still cannot rank a caller-supplied corrupted buffer).
+
+    Without `crc_manifest` this remains a report-and-stop: EB needs query-time est_dist/g_error
+    (C++-only) plus the clean-CRC definition (Python-only) — silently proceeding without the
+    manifest would mean the C++ side inventing "clean", violating hard rule #1.
+    """
+    if not crc_manifest:
+        raise RuntimeError(
+            "REPORT-AND-STOP: EB-fallback needs the CLEAN index's CRC manifest "
+            "(qp.rabitq.crc_manifest.write_manifest BEFORE injection); pass crc_manifest=. "
+            "Without it the C++ side would have to invent the definition of 'clean' "
+            f"(index_path={index_path!r}, fraction={fraction!r}, seed={seed!r})")
+    res = query_with_recovery(index_path, "fallback_eb", crc_manifest, k=k, ef=ef,
+                              out_path=out_path, query_f=query_f, gt_f=gt_f, timeout=timeout)
+    res["distances"] = None
+    res["_eb_path"] = True
+    res["eb_fraction"] = float(fraction)
+    return res
 
 
 def search_corrupted(index_path, k=None, ef=2000, out_path=None, query_f=None, gt_f=None,

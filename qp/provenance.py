@@ -14,6 +14,7 @@ Every Stage-1 result JSON (E1 vuln_map / criticality, E3a, E3b) embeds the dict 
 This module only READS state (platform, the resolved adapter, the index header, dep versions);
 it never re-runs a measurement.
 """
+import hashlib
 import os
 import platform
 import socket
@@ -74,13 +75,38 @@ def _dep_versions():
     return deps
 
 
-def collect_provenance(adapter, adapter_nm, clean, cfg, args, rmap=None):
+def sha256_file(path, chunk=1 << 20):
+    """sha256 hexdigest of a file (streamed) — identifies the exact index/manifest bytes used."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while True:
+            b = fh.read(chunk)
+            if not b:
+                return h.hexdigest()
+            h.update(b)
+
+
+def sha256_bytes(buf):
+    """sha256 hexdigest of an in-memory buffer (bytes / bytearray / uint8 ndarray)."""
+    return hashlib.sha256(bytes(memoryview(buf))).hexdigest()
+
+
+def collect_provenance(adapter, adapter_nm, clean, cfg, args, rmap=None, *,
+                       index_sha256=None, corrupted_regions=None, recovery=None,
+                       crc_manifest_sha256=None):
     """Build the ``meta`` stamp for a Stage-1 result file.
 
     ``platform_confirmed_real`` is a TRIANGULATION, not an inference: True only when the resolved
     adapter is the real one AND the host arch is x86_64 AND the clean recall sits on the index's
     reference plateau. The stub's ``binaries_built()`` returns True on any host, so it is
     deliberately EXCLUDED from the confirmation (it is recorded for transparency only).
+
+    The keyword-only ``index_sha256`` / ``corrupted_regions`` / ``recovery`` /
+    ``crc_manifest_sha256`` add a ``corruption`` block for Experiment-B-style runs (Option B):
+    which exact index bytes were queried, which regions Python injected into
+    (stage2_cpp_patch.md rule 3: currently ["ex_code"] — EB-fallback assumes bin+factors
+    intact), and which recovery mode/manifest the C++ side used. Callers that pass none of
+    them get the exact pre-existing meta shape (no golden churn).
     """
     machine = platform.machine()
     expected = getattr(adapter, "EXPECTED_CLEAN_RECALL10", None)
@@ -104,7 +130,7 @@ def collect_provenance(adapter, adapter_nm, clean, cfg, args, rmap=None):
     except Exception:
         geom = None
 
-    return {
+    meta = {
         "adapter_type": adapter_nm,
         "platform": {
             "machine": machine,
@@ -138,3 +164,12 @@ def collect_provenance(adapter, adapter_nm, clean, cfg, args, rmap=None):
         "deps": _dep_versions(),
         "units": dict(UNITS),
     }
+    if any(v is not None for v in (index_sha256, corrupted_regions, recovery,
+                                   crc_manifest_sha256)):
+        meta["corruption"] = {
+            "index_sha256": index_sha256,              # sha256 of the (corrupted) file queried
+            "corrupted_regions": corrupted_regions,    # e.g. ["ex_code"] — rule 3 metadata
+            "recovery": recovery,                      # none | drop | fallback_eb
+            "crc_manifest_sha256": crc_manifest_sha256,
+        }
+    return meta

@@ -3,7 +3,8 @@
 #
 # Idempotent: every step skips if its output already exists. Steps:
 #   1. clone RaBitQ-Library into <rabitq_repo>/third_party/RaBitQ-Library
-#   2. git apply rabitq_instrumentation/library-changes.patch
+#   2. git apply rabitq_instrumentation/library-changes.patch, then (2b) quant_protection's
+#      rabitq_instrumentation/recovery-changes.patch (Option B CRC-manifest recovery)
 #   3. copy exp_faultinject.cpp / exp_fieldflip.cpp into sample/
 #   4. cmake -DCMAKE_BUILD_TYPE=Release && make -j   (binaries -> third_party/.../bin)
 #   5. prepare SIFT (base/query/gt/centroids/clusterids) via prepare_rabitq.py
@@ -62,6 +63,19 @@ if ! grep -q "set_fault_injection" "$LIB/include/rabitqlib/index/hnsw/hnsw.hpp" 
   ( cd "$LIB" && git apply "$INSTR/library-changes.patch" ) || fail "git apply failed"
 else
   say "[2/7] patch: already applied"
+fi
+
+# 2b. RECOVERY PATCH (Option B) --------------------------------------------
+# Second sentinel-gated patch, applied ON TOP of library-changes.patch: CRC-manifest-driven
+# corruption detection (load_crc_manifest) feeding the same exp-3 fault hooks. Lives in THIS
+# repo ($QP_ROOT/rabitq_instrumentation, like exp_dumpids.cpp), not Samuel's $INSTR — it is
+# quant_protection's Stage 2 instrument.
+if ! grep -q "load_crc_manifest" "$LIB/include/rabitqlib/index/hnsw/hnsw.hpp" 2>/dev/null; then
+  say "[2/7] applying recovery-changes.patch (Option B)"
+  ( cd "$LIB" && git apply "$QP_ROOT/rabitq_instrumentation/recovery-changes.patch" ) \
+    || fail "recovery-changes.patch failed (it must apply on top of library-changes.patch)"
+else
+  say "[2/7] recovery patch: already applied"
 fi
 
 # 3. COPY EXPERIMENT SOURCES ---------------------------------------------
@@ -123,6 +137,13 @@ elif [ "$(uname)" = "Linux" ]; then
 fi
 
 # 4. BUILD ----------------------------------------------------------------
+# A cached exp_dumpids that predates --recovery (its usage line lacks the flag) was compiled
+# against the pre-Option-B header: delete it so the cache check below forces a full rebuild
+# (the header is shared, so ALL sample binaries must recompile against the patched hnsw.hpp).
+if [ -x "$BIN/exp_dumpids" ] && ! "$BIN/exp_dumpids" 2>&1 | grep -q -- "--recovery"; then
+  say "[4/7] exp_dumpids predates --recovery; forcing rebuild"
+  rm -f "$BIN/exp_dumpids"
+fi
 # Include exp_dumpids in the cache check so a stale build that predates it triggers a rebuild.
 if [ ! -x "$BIN/hnsw_rabitq_querying" ] || [ ! -x "$BIN/exp_faultinject" ] \
    || [ ! -x "$BIN/exp_dumpids" ]; then

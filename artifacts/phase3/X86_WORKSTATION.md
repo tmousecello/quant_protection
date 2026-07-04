@@ -91,3 +91,9 @@ registers a CMake target. `qp/rabitq/adapter.query_ids()` runs it, parses the iv
 
 See `artifacts/phase3/STAGE0_STATUS.md` for component-by-component status and the (now resolved)
 blocked items.
+
+## Stage 2 Option B (Experiment B)
+
+The `--recovery {none|drop|fallback_eb}` patch, CRC-manifest tool, and Experiment-B
+gates/sweep are documented in `artifacts/phase3/EXPB_RUNBOOK.md` (build → gates 1-5 → 2
+sweeps at light/severe per-element damage → cheap Experiment-A follow-ups).

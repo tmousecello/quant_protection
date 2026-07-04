@@ -1,0 +1,184 @@
+diff --git a/include/rabitqlib/index/hnsw/hnsw.hpp b/include/rabitqlib/index/hnsw/hnsw.hpp
+index 56e9a42..a2234db 100644
+--- a/include/rabitqlib/index/hnsw/hnsw.hpp
++++ b/include/rabitqlib/index/hnsw/hnsw.hpp
+@@ -95,6 +95,144 @@ class HierarchicalNSW {
+     [[nodiscard]] size_t fi_size_links0() const { return size_links_level0_; }
+     [[nodiscard]] char* fi_level0() { return data_level0_memory_; }
+ 
++    // ===== Option B: CRC-manifest-driven corruption detection (quant_protection) =====
++    // Python (qp.rabitq.crc_manifest) CRCs each element's ex field of the CLEAN index
++    // BEFORE injection; load_crc_manifest() re-CRCs the LOADED (possibly corrupted) bytes
++    // against that manifest and fills ex_corrupt_ -- the same bitmap the FAULT_* search
++    // hooks below already consume, so drop/fallback_eb keep Samuel's exp-3 semantics
++    // byte-for-byte. The scan is EAGER (all elements once, at load): the index memory is
++    // immutable during querying, so this is bit-for-bit equivalent to checking each
++    // candidate's CRC right before its ex chunk is read, at zero query-path cost.
++    // C++ NEVER injects; it only detects (injection's single source of truth is qp.faults).
++    //
++    // EB-fallback dependency (stage2_cpp_patch.md rule 3): FAULT_FALLBACK_EB ranks a
++    // corrupt vector via the 1-bit estimate from bin_code + bin_factors (f_error), which
++    // assumes those bytes are INTACT. Experiment B corrupts ex_code only, so this holds.
++    // When a future experiment corrupts bin/factors too, THIS is the first place to change
++    // (the manifest field window below is pinned inside the ex block for that reason).
++    bool fi_crc_mode_ = false;
++    size_t fi_crc_checked_ = 0;  // load-time scan: elements CRC-verified
++    size_t fi_crc_failed_ = 0;   // load-time scan: elements whose ex bytes mismatched
++    struct FiQueryStats {        // per-query recovery counters (single-thread search only;
++        uint64_t consults = 0;   //   caller resets between queries via fi_reset_query_stats)
++        uint64_t corrupt_hits = 0;
++        uint64_t fallbacks = 0;  // candidates ranked by the EB pessimistic bound
++        uint64_t drops = 0;      // candidates skipped under FAULT_DROP
++    };
++    FiQueryStats fi_qstats_;
++    void fi_reset_query_stats() { fi_qstats_ = FiQueryStats{}; }
++
++    // CRC-32/ISO-HDLC (poly 0xEDB88320 reflected, init/final-xor 0xFFFFFFFF) == zlib.crc32,
++    // the exact algorithm the Python manifest writer uses (manifest algo tag 1).
++    static uint32_t fi_crc32(const char* data, size_t n) {
++        static const std::vector<uint32_t> table = [] {
++            std::vector<uint32_t> t(256);
++            for (uint32_t i = 0; i < 256; i++) {
++                uint32_t c = i;
++                for (int k = 0; k < 8; k++) {
++                    c = ((c & 1U) != 0) ? 0xEDB88320U ^ (c >> 1) : c >> 1;
++                }
++                t[i] = c;
++            }
++            return t;
++        }();
++        uint32_t crc = 0xFFFFFFFFU;
++        for (size_t i = 0; i < n; i++) {
++            crc = table[(crc ^ static_cast<unsigned char>(data[i])) & 0xFFU] ^ (crc >> 8);
++        }
++        return crc ^ 0xFFFFFFFFU;
++    }
++
++    // Load a qp CRC manifest (crc_manifest.py: 64-B header + n x {u64 off, u32 len, u32 crc},
++    // little-endian) and eagerly verify every element's ex bytes, then arm `policy`
++    // (FAULT_DROP or FAULT_FALLBACK_EB). Call AFTER load(). Throws on any header/geometry
++    // mismatch -- pairing the wrong manifest with the wrong index must fail loudly, not skew
++    // results silently.
++    void load_crc_manifest(const char* path, int policy) {
++        // Self-test the CRC kernel before trusting a 10^6-element scan to it.
++        if (fi_crc32("123456789", 9) != 0xCBF43926U) {
++            throw std::runtime_error("fi_crc32 self-test failed");
++        }
++        std::ifstream mf(path, std::ios::binary);
++        if (!mf.is_open()) {
++            throw std::runtime_error(std::string("cannot open CRC manifest ") + path);
++        }
++        char magic[8];
++        uint32_t version = 0;
++        uint32_t algo = 0;
++        uint32_t field_len = 0;
++        uint32_t reserved = 0;
++        uint64_t n_entries = 0;
++        uint64_t index_file_size = 0;
++        uint64_t level0_start = 0;
++        uint64_t spe = 0;
++        uint64_t field_off = 0;
++        mf.read(magic, 8);
++        mf.read(reinterpret_cast<char*>(&version), 4);
++        mf.read(reinterpret_cast<char*>(&algo), 4);
++        mf.read(reinterpret_cast<char*>(&n_entries), 8);
++        mf.read(reinterpret_cast<char*>(&index_file_size), 8);
++        mf.read(reinterpret_cast<char*>(&level0_start), 8);
++        mf.read(reinterpret_cast<char*>(&spe), 8);
++        mf.read(reinterpret_cast<char*>(&field_off), 8);
++        mf.read(reinterpret_cast<char*>(&field_len), 4);
++        mf.read(reinterpret_cast<char*>(&reserved), 4);
++        const char kMagic[8] = {'Q', 'P', 'C', 'R', 'C', 'M', 'F', '\x01'};
++        bool magic_ok = static_cast<bool>(mf);
++        for (int i = 0; i < 8; i++) {
++            magic_ok = magic_ok && magic[i] == kMagic[i];
++        }
++        if (!magic_ok) {
++            throw std::runtime_error("bad CRC manifest magic/header");
++        }
++        if (version != 1 || algo != 1) {
++            throw std::runtime_error("unsupported CRC manifest version/algo");
++        }
++        // Geometry echo checks: manifest must describe THIS index's layout. level0 start on
++        // disk = 156-B header + centroids (mirrors save()); the CRC'd field window must lie
++        // inside the ex block (ex_corrupt_ drives EX-recovery semantics -- a manifest over
++        // bin/links would silently mean something else).
++        const uint64_t want_level0 =
++            156 + static_cast<uint64_t>(num_cluster_) * padded_dim_ * sizeof(float);
++        if (n_entries != cur_element_count_ || level0_start != want_level0 ||
++            spe != size_data_per_element_ || field_off < offsetExData_ ||
++            field_off + field_len > offsetExData_ + size_ex_data_) {
++            throw std::runtime_error("CRC manifest geometry does not match loaded index");
++        }
++        struct Entry {
++            uint64_t off;
++            uint32_t len;
++            uint32_t crc;
++        };
++        static_assert(sizeof(Entry) == 16, "manifest entry must be packed to 16 bytes");
++        std::vector<Entry> entries(n_entries);
++        mf.read(reinterpret_cast<char*>(entries.data()),
++                static_cast<std::streamsize>(n_entries * sizeof(Entry)));
++        if (!mf) {
++            throw std::runtime_error("CRC manifest truncated");
++        }
++        ex_corrupt_.assign(cur_element_count_, 0);
++        fi_crc_checked_ = 0;
++        fi_crc_failed_ = 0;
++        for (uint64_t i = 0; i < n_entries; i++) {
++            if (entries[i].off != level0_start + i * spe + field_off ||
++                entries[i].len != field_len) {
++                throw std::runtime_error("CRC manifest entry offset/len mismatch");
++            }
++            // The on-disk LEVEL0 block is a verbatim copy of data_level0_memory_, so the
++            // in-memory bytes at the same per-element offset are the bytes the manifest
++            // CRC'd on disk (offsets within an element are identical).
++            const char* ex = data_level0_memory_ + i * size_data_per_element_ + field_off;
++            fi_crc_checked_++;
++            if (fi_crc32(ex, field_len) != entries[i].crc) {
++                ex_corrupt_[i] = 1;
++                fi_crc_failed_++;
++            }
++        }
++        fault_policy_ = policy;
++        fi_crc_mode_ = true;
++    }
++
+     struct ResultRecord {
+         float est_dist;
+         float low_dist;
+@@ -1278,8 +1416,14 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
+ 
+             // Fault injection: a CRC-detected ex corruption under FAULT_DROP removes the
+             // node entirely (no result, no routing) -- the "detect & skip" baseline.
+-            if (fault_policy_ == FAULT_DROP && ex_corrupted(candidate_id)) {
+-                continue;
++            // (Counters only; the skip decision is Samuel's unchanged exp-3 semantics.)
++            if (fault_policy_ == FAULT_DROP) {
++                fi_qstats_.consults++;
++                if (ex_corrupted(candidate_id)) {
++                    fi_qstats_.corrupt_hits++;
++                    fi_qstats_.drops++;
++                    continue;
++                }
+             }
+ 
+             // Bounds-check guard: convert a structurally-invalid id (which would otherwise
+@@ -1313,9 +1457,15 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
+                 // Error-bound-aware fallback: rank a corrupted vector by its pessimistic
+                 // upper-bound distance (est + (est - low)) so its coarse 1-bit estimate
+                 // cannot create a false positive that evicts a true neighbour.
++                // (Counters only; the formula is Samuel's unchanged exp-3 semantics.)
+                 float rank_dist = candest.est_dist;
+-                if (fault_policy_ == FAULT_FALLBACK_EB && ex_corrupted(candidate_id)) {
+-                    rank_dist = candest.est_dist + (candest.est_dist - candest.low_dist);
++                if (fault_policy_ == FAULT_FALLBACK_EB) {
++                    fi_qstats_.consults++;
++                    if (ex_corrupted(candidate_id)) {
++                        fi_qstats_.corrupt_hits++;
++                        fi_qstats_.fallbacks++;
++                        rank_dist = candest.est_dist + (candest.est_dist - candest.low_dist);
++                    }
+                 }
+                 Candidate cand{
+                     ResultRecord(rank_dist, candest.low_dist),

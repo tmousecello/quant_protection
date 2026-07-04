@@ -221,7 +221,10 @@ def run(args):
     out_dir = os.path.join(config.ROOT, "artifacts_smoke" if args.smoke else "artifacts",
                            "phase3", "e3c")
     os.makedirs(out_dir, exist_ok=True)
-    raw_path = os.path.join(out_dir, f"e3c_{args.pattern}_{rlabel}.records.jsonl")
+    # --measure-recall runs get their own filenames — never clobber the inject-only records.
+    stem = f"e3c_{args.pattern}_{rlabel}" + (
+        "_recall" if getattr(args, "measure_recall", False) else "")
+    raw_path = os.path.join(out_dir, f"{stem}.records.jsonl")
 
     adapter = get_adapter(args.adapter)
     aname = adapter_name(adapter)
@@ -302,7 +305,7 @@ def run(args):
         summary["measure_recall"] = True
         summary["clean_recall@10"] = clean_recall
         summary["final_recall@10"] = records[-1].get("recall@10")
-    out_json = os.path.join(out_dir, f"e3c_{args.pattern}_{rlabel}.json")
+    out_json = os.path.join(out_dir, f"{stem}.json")
     with open(out_json, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"[e3c] done → {out_json}")

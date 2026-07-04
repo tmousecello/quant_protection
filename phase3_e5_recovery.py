@@ -483,7 +483,9 @@ def run(args):
           f"inject_replicas={inject_replicas}")
 
     records = []
-    raw_path = os.path.join(out_dir, f"e5_{args.pattern}_{rlabel}.records.jsonl")
+    # --inject-replicas runs get their own filenames — never clobber the baseline records.
+    stem = f"e5_{args.pattern}_{rlabel}" + ("_replicas" if inject_replicas else "")
+    raw_path = os.path.join(out_dir, f"{stem}.records.jsonl")
     with tempfile.NamedTemporaryFile(suffix=".index", delete=False) as tmp_f:
         tmp_path = tmp_f.name
 
@@ -534,7 +536,7 @@ def run(args):
     if inject_replicas:
         summary["inject_replicas"] = True
         summary["final_replica_bits"] = records[-1].get("replica_bits") if records else None
-    out_json = os.path.join(out_dir, f"e5_{args.pattern}_{rlabel}.json")
+    out_json = os.path.join(out_dir, f"{stem}.json")
     with open(out_json, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"[e5] done → {out_json}")

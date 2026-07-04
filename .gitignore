@@ -55,3 +55,9 @@ artifacts/phase3/e*/*.out.ivecs
 #   artifacts/phase1/vuln_map.{json,csv}
 #   artifacts/phase1/sensitivity_table.{csv,md}
 #   artifacts/phase1/failure_modes.csv
+
+# --- expb (Option B) temp/regenerable binaries: 280M index copies, dumped ids, CRC manifest ---
+artifacts/phase3/expb/_expb_*.index
+artifacts/phase3/expb/_expb_dumpids.ivecs
+artifacts/phase3/expb/_expb_dumpids.ivecs.stats.json
+artifacts/phase3/expb/*.crcmf

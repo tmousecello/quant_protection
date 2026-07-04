@@ -22,11 +22,12 @@ All patterns are deterministic in the per-tick seed the caller supplies.
 import argparse
 import json
 import os
+import subprocess
 import tempfile
 
 import numpy as np
 
-from qp import config, faults
+from qp import config, faults, metrics
 from qp.rabitq import layout
 from qp.rabitq.registry import get_adapter, adapter_name
 
@@ -231,23 +232,55 @@ def run(args):
 
     corruptor = TemporalCorruptor(region, cfg)
 
+    # --measure-recall: per-tick NO-RECOVERY recall timeline (Experiment A's direct
+    # measurement — turns the "cliff within <=2 ticks" derivation into observed data).
+    # Flag-gated: default off keeps the original inject-only records byte-compatible.
+    measure_recall = bool(getattr(args, "measure_recall", False))   # robust to bare Namespace
+    search_timeout = getattr(args, "timeout", None)
+    gt = adapter.load_groundtruth() if measure_recall else None
+    tmp_path = None
+    clean_recall = None
+    if measure_recall:
+        with tempfile.NamedTemporaryFile(suffix=".index", delete=False) as tmp_f:
+            tmp_path = tmp_f.name
+        adapter.deserialize_index(buf, tmp_path)          # buf is still clean here
+        clean_res = adapter.search_corrupted(tmp_path, timeout=search_timeout)
+        clean_recall = float(metrics.recall_at_k(clean_res["ids"], gt, config.K))
+        print(f"[e3c] clean baseline recall@10 = {clean_recall:.5f}")
+
     records = []
     print(f"[e3c] adapter={aname} region={rlabel} pattern={args.pattern} "
-          f"ticks={cfg['ticks']}")
+          f"ticks={cfg['ticks']} measure_recall={measure_recall}")
 
-    with open(raw_path, "w") as raw_f:
-        for tick in range(cfg["ticks"]):
-            seed = cfg["seed"] ^ tick
-            positions = corruptor.inject_step(buf, args.pattern, seed)
-            cc = corruptor.cumulative_corruption()
-            row = {"tick": tick, "positions_this_tick": len(positions),
-                   "cumulative_corruption": cc, "pattern": args.pattern,
-                   "region": rlabel, "adapter": aname}
-            raw_f.write(json.dumps(row) + "\n")
-            records.append(row)
-            if tick % 10 == 0 or tick == cfg["ticks"] - 1:
-                print(f"  tick={tick:3d}  bits_flipped={cc['bits_flipped']:4d}  "
-                      f"fraction={cc['fraction']:.4f}")
+    try:
+        with open(raw_path, "w") as raw_f:
+            for tick in range(cfg["ticks"]):
+                seed = cfg["seed"] ^ tick
+                positions = corruptor.inject_step(buf, args.pattern, seed)
+                cc = corruptor.cumulative_corruption()
+                row = {"tick": tick, "positions_this_tick": len(positions),
+                       "cumulative_corruption": cc, "pattern": args.pattern,
+                       "region": rlabel, "adapter": aname}
+                if measure_recall:
+                    adapter.deserialize_index(buf, tmp_path)
+                    try:
+                        res = adapter.search_corrupted(tmp_path, timeout=search_timeout)
+                        row["recall@10"] = float(metrics.recall_at_k(res["ids"], gt, config.K))
+                        row["failure_mode"] = metrics.classify_failure(
+                            None, res.get("distances"), res["ids"], row["recall@10"],
+                            clean_recall)
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                        row["recall@10"] = None
+                        row["failure_mode"] = metrics.CRASH
+                raw_f.write(json.dumps(row) + "\n")
+                records.append(row)
+                if tick % 10 == 0 or tick == cfg["ticks"] - 1:
+                    extra = (f"  recall={row['recall@10']}" if measure_recall else "")
+                    print(f"  tick={tick:3d}  bits_flipped={cc['bits_flipped']:4d}  "
+                          f"fraction={cc['fraction']:.4f}{extra}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
     # Reset check: verify reset restores buf
     clean_check = adapter.serialize_index()
@@ -265,6 +298,10 @@ def run(args):
         "adapter": aname,
         "cfg": cfg,
     }
+    if measure_recall:
+        summary["measure_recall"] = True
+        summary["clean_recall@10"] = clean_recall
+        summary["final_recall@10"] = records[-1].get("recall@10")
     out_json = os.path.join(out_dir, f"e3c_{args.pattern}_{rlabel}.json")
     with open(out_json, "w") as f:
         json.dump(summary, f, indent=2)
@@ -282,6 +319,11 @@ def main():
     ap.add_argument("--p", type=float, default=None)
     ap.add_argument("--seed", type=int, default=config.SEED)
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--measure-recall", dest="measure_recall", action="store_true",
+                    help="per-tick NO-RECOVERY recall timeline (Experiment A direct "
+                         "measurement); default off = original inject-only records")
+    ap.add_argument("--timeout", type=float, default=900.0,
+                    help="per-search subprocess seconds (only used with --measure-recall)")
     args = ap.parse_args()
     run(args)
 

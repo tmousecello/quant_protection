@@ -68,6 +68,13 @@ def _field_geometry(rmap, field):
     return int(level0["byte_start"]), spe, int(s0 - level0["byte_start"]), int(flen), n
 
 
+# Public alias: the Experiment-B driver reuses the stride-validated geometry (offsets from
+# layout.element_field_range) instead of re-deriving element addressing by hand.
+def field_geometry(rmap, field=DEFAULT_FIELD):
+    """(level0_start, size_data_per_element, field_off_in_element, field_len, n_elements)."""
+    return _field_geometry(rmap, field)
+
+
 def build_manifest(buf, rmap, field=DEFAULT_FIELD):
     """Serialize a manifest (bytes) from a CLEAN index buffer. Pure — no filesystem."""
     buf = np.asarray(buf, dtype=np.uint8)

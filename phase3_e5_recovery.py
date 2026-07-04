@@ -156,6 +156,16 @@ class RecoveryGuard:
 
         return res
 
+    def rotation_replicas(self):
+        """The live R rotation copies (mutable arrays) — exposed for --inject-replicas.
+
+        Experiment A's honest caveat: the R=3 copies live in independent memory that the
+        default runs never corrupt, so cliff_irrecoverable=0 is structural. Injecting into
+        these (same per-bit process, independent streams) measures majority-vote under
+        simultaneous replica accumulation — the multi-copy failure boundary.
+        """
+        return self._rot_copies
+
     def scrub_if_due(self, buf, tick):
         """Lazy batch reload: if slope corruption fraction > threshold, reload clean ex chunks."""
         if self._ex_region is None:
@@ -459,8 +469,18 @@ def run(args):
 
     buf = clean_buf.copy()
 
+    # --inject-replicas: subject each rotation replica to the SAME per-tick fault process
+    # (same p / pattern cfg) on an INDEPENDENT stream (seed differs per replica), closing the
+    # "replicas are immortal" caveat. Each replica is a standalone buffer -> region (0, len).
+    inject_replicas = bool(getattr(args, "inject_replicas", False))
+    rep_corruptors = []
+    if inject_replicas:
+        rep_corruptors = [TemporalCorruptor((0, int(copy.size)), cfg)
+                          for copy in guard.rotation_replicas()]
+
     print(f"[e5] adapter={aname} region={rlabel} pattern={args.pattern} "
-          f"ticks={cfg['ticks']} parity_on={cfg['parity_on']}")
+          f"ticks={cfg['ticks']} parity_on={cfg['parity_on']} "
+          f"inject_replicas={inject_replicas}")
 
     records = []
     raw_path = os.path.join(out_dir, f"e5_{args.pattern}_{rlabel}.records.jsonl")
@@ -474,6 +494,12 @@ def run(args):
                 corruptor.inject_step(buf, args.pattern, seed)
                 cc = corruptor.cumulative_corruption()
 
+                if inject_replicas:
+                    for r, (rc, copy) in enumerate(zip(rep_corruptors,
+                                                       guard.rotation_replicas())):
+                        # independent stream per replica: same process, different seed lane
+                        rc.inject_step(copy, args.pattern, seed ^ ((r + 1) * 0x5EED))
+
                 res = guard.search_with_recovery(buf, tmp_path)
                 ids = res.get("ids")
                 recall = float(metrics.recall_at_k(ids, gt, config.K)) if ids is not None else None
@@ -483,6 +509,10 @@ def run(args):
                        "recall@10": recall, "counters": ctr,
                        "_eb_path": res.get("_eb_path", False),
                        "pattern": args.pattern, "region": rlabel, "adapter": aname}
+                if inject_replicas:
+                    # bits currently differing from clean, per replica (post-scrub state)
+                    row["replica_bits"] = [rc.cumulative_corruption()["bits_flipped"]
+                                           for rc in rep_corruptors]
                 raw_f.write(json.dumps(row) + "\n")
                 records.append(row)
                 guard.scrub_if_due(buf, tick)
@@ -501,6 +531,9 @@ def run(args):
         "final_recall@10": records[-1]["recall@10"] if records else None,
         "adapter": aname, "cfg": cfg,
     }
+    if inject_replicas:
+        summary["inject_replicas"] = True
+        summary["final_replica_bits"] = records[-1].get("replica_bits") if records else None
     out_json = os.path.join(out_dir, f"e5_{args.pattern}_{rlabel}.json")
     with open(out_json, "w") as f:
         json.dump(summary, f, indent=2)
@@ -517,6 +550,9 @@ def main():
     ap.add_argument("--seed", type=int, default=config.SEED)
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--parity-on", dest="parity_on", action="store_true")
+    ap.add_argument("--inject-replicas", dest="inject_replicas", action="store_true",
+                    help="also corrupt the R=3 rotation replicas each tick (same process, "
+                         "independent streams) — measures majority-vote failure boundary")
     args = ap.parse_args()
     run(args)
 

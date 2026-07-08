@@ -221,3 +221,55 @@ class TestSection72Reproduction:
             assert r["fstar_drop"] == pytest.approx(exp_drop, abs=5e-4), r
             assert r["fstar_eb"] == pytest.approx(exp_eb, abs=5e-4), r
             assert r["interval_ratio"] == pytest.approx(exp_ratio, abs=5e-3), r
+
+
+# ---------------------------------------------------------------------------
+# G detection (#4)
+# ---------------------------------------------------------------------------
+
+from phase3_g_detection import extract_points, deviation_stats
+
+
+def _g_row(pattern, fraction, actual, recovery, checked, crc_fail, consults, hits):
+    return {"pattern": pattern, "fraction": fraction, "fraction_actual": actual,
+            "recovery": recovery,
+            "stats": {"load": {"elements_checked": checked, "elements_crc_fail": crc_fail},
+                      "totals": {"consults": consults, "corrupt_hits": hits}}}
+
+
+class TestGDetection:
+    def test_extract_excludes_none_and_computes_ratios(self):
+        rows = [
+            _g_row("uniform_accum", 0.05, 0.05, "drop", 1000, 50, 2000, 100),
+            _g_row("uniform_accum", 0.05, 0.05, "fallback_eb", 1000, 50, 400, 20),
+            # recovery=none: no load scan ran -> excluded
+            {"pattern": "uniform_accum", "fraction": 0.05, "fraction_actual": 0.05,
+             "recovery": "none", "stats": {"load": {"elements_checked": 0,
+                                                    "elements_crc_fail": 0}}},
+        ]
+        points, excluded = extract_points(rows, "light")
+        assert excluded == 1
+        assert len(points) == 2
+        assert points[0]["observed_load"] == pytest.approx(0.05)
+        assert points[0]["observed_access"] == pytest.approx(0.05)
+        assert points[1]["observed_access"] == pytest.approx(0.05)
+        assert points[0]["severity"] == "light"
+
+    def test_zero_consults_gives_none_access_ratio(self):
+        points, _ = extract_points(
+            [_g_row("burst_accum", 0.2, 0.2, "drop", 100, 20, 0, 0)], "sev384")
+        assert points[0]["observed_access"] is None
+        assert points[0]["observed_load"] == pytest.approx(0.2)
+
+    def test_deviation_stats_exact_diagonal(self):
+        points, _ = extract_points(
+            [_g_row("uniform_accum", 0.05, 0.0625, "drop", 64, 4, 10, 1)], "light")
+        d = deviation_stats(points)
+        assert d["n_points"] == 1
+        assert d["max_abs_dev_vs_truth"] == 0.0
+        assert d["identical_to_truth"] is True
+        # nominal fraction differs from actual (rounding) -> nonzero vs nominal
+        assert d["max_abs_dev_vs_nominal"] == pytest.approx(0.0125)
+
+    def test_empty_points(self):
+        assert deviation_stats([]) == {"n_points": 0}

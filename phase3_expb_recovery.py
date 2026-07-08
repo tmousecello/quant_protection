@@ -239,7 +239,10 @@ def setup_context(args):
         corrupted_regions=[FIELD],
         recovery=list(RECOVERY_MODES),
         crc_manifest_sha256=provenance.sha256_file(manifest_path))
-    meta_path = os.path.join(out_dir, "expb_meta.json")
+    # Tagged sweeps (e.g. --out-tag fstar_check) get their own meta file — a fixed name
+    # would overwrite the original sweeps' provenance stamp.
+    _tag = f"_{args.out_tag}" if getattr(args, "out_tag", None) else ""
+    meta_path = os.path.join(out_dir, f"expb_meta{_tag}.json")
     with open(meta_path, "w") as fh:
         json.dump({"meta": meta}, fh, indent=2)
 

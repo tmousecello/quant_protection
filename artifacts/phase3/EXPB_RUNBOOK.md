@@ -67,8 +67,13 @@ python phase3_expb_recovery.py --adapter real --sweep --flips-per-element 384 --
 sweep; ~15 s each at ef=2000 plus injection time → budget **≤ 1 h per sweep**. Long runs:
 `tmux` per WORKSTATION.md.
 
+**Never run two expb processes concurrently** — `_expb_clean.index`, `_expb_corrupt.index`,
+the CRC manifest and the dumpids scratch files under `expb/` are shared per-directory
+scratch; parallel sweeps would cross-write them. Tagged sweeps (`--out-tag`) shard their
+records and meta (`expb_meta_<tag>.json`) but still share the scratch — run sequentially.
+
 Outputs in `artifacts/phase3/expb/` (git-ignored; bring numbers back per `git_tasks.sh`):
-- `expb_meta.json` — provenance, stamped BEFORE any corruption run
+- `expb_meta[_<tag>].json` — provenance, stamped BEFORE any corruption run
   (`corruption.corrupted_regions == ["ex_code"]`, manifest + clean index sha256).
 - `expb_<pattern>_ex_code[_<tag>].records.jsonl` — one row per (fraction × recovery):
   `recall@10` (qp.metrics, authoritative), `cpp_recall` (parity only), `delta_vs_clean`,

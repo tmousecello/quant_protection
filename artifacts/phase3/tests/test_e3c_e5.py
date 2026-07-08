@@ -381,6 +381,140 @@ class TestE5CliffWithE3c:
                 os.unlink(tmp)
 
 
+class TestE5CliffSelfScrub:
+    """Stage-3 task #1: vote-failure-triggered full reload + low-frequency anchor backstop."""
+
+    def setup_method(self):
+        self.rmap = _rmap()
+        self.cfg = {**E5_SMOKE_CFG, "R": 3, "chunk_size": 16,
+                    "cliff_scrub": True, "anchor_every": 5}
+        self.guard = RecoveryGuard(adapter, self.cfg, self.rmap)
+        self.clean_buf = _clean()
+        self.guard.init_from_clean(self.clean_buf)
+        self.bs, self.bl = self.guard._rot_region
+
+    def _clean_rot(self):
+        return np.asarray(self.clean_buf[self.bs:self.bs + self.bl], dtype=np.uint8)
+
+    def test_vote_failure_triggers_full_recovery(self):
+        """Run-4 scenario (2 of 3 copies same bit) → reload → all clean → next vote normal."""
+        buf = self.clean_buf.copy()
+        self.guard._rot_copies[0][0] ^= 0b00000001
+        self.guard._rot_copies[1][0] ^= 0b00000001
+
+        self.guard._scrub_cliff(buf)
+
+        assert self.guard._cliff_reload_triggered == 1
+        assert self.guard._cliff_irrecoverable == 0, \
+            "recovered event must not count as irrecoverable"
+        assert np.array_equal(buf[self.bs:self.bs + self.bl], self._clean_rot())
+        for r in range(3):
+            assert np.array_equal(self.guard._rot_copies[r], self._clean_rot()), \
+                f"copy[{r}] not reloaded to clean"
+
+        # Voting must be functional again (not a blown fuse): a single-copy flip repairs.
+        self.guard._rot_copies[0][3] ^= 0b00010000
+        self.guard._scrub_cliff(buf)
+        assert self.guard._cliff_irrecoverable == 0
+        assert self.guard._cliff_reload_triggered == 1, "normal repair must not re-trigger reload"
+        assert np.array_equal(self.guard._rot_copies[0], self._clean_rot())
+
+    def test_full_reload_clears_unrelated_damage(self):
+        """Full-region semantics: accumulated damage at OTHER positions is also cleared."""
+        buf = self.clean_buf.copy()
+        # The vote-failure double hit ...
+        self.guard._rot_copies[0][0] ^= 0b00000001
+        self.guard._rot_copies[1][0] ^= 0b00000001
+        # ... plus unaligned accumulated damage elsewhere on every copy (run-4 tick 2 had
+        # [1,3,5] bits spread across the replicas) and on buf itself.
+        self.guard._rot_copies[0][5] ^= 0b00100000
+        self.guard._rot_copies[1][9] ^= 0b00000110
+        self.guard._rot_copies[2][2] ^= 0b10000001
+        buf[self.bs + 7] ^= 0b00001000
+
+        self.guard._scrub_cliff(buf)
+
+        assert self.guard._cliff_reload_triggered == 1
+        assert np.array_equal(buf[self.bs:self.bs + self.bl], self._clean_rot()), \
+            "buf rotation must be fully clean, not just the failed bit"
+        for r in range(3):
+            assert np.array_equal(self.guard._rot_copies[r], self._clean_rot()), \
+                f"copy[{r}] still carries damage at other positions after full reload"
+
+    def test_anchor_catches_silent_wrong_vote(self):
+        """Silent wrong majority (poisoned CRC anchor models a CRC collision / DRAM-hit
+        anchor) → the periodic anchor check catches it from persistent storage and reloads."""
+        buf = self.clean_buf.copy()
+        # 2 of 3 copies same-position same-value: majority IS the wrong value.
+        self.guard._rot_copies[0][0] ^= 0b00000001
+        self.guard._rot_copies[1][0] ^= 0b00000001
+        wrong = np.array(self._clean_rot(), dtype=np.uint8)
+        wrong[0] ^= 0b00000001
+        # Poison the in-memory CRC anchor so the vote verification passes silently.
+        self.guard._rot_clean_crc = zlib.crc32(bytes(wrong))
+
+        self.guard._scrub_cliff(buf)
+        assert self.guard._cliff_reload_triggered == 0, "vote must succeed silently here"
+        assert np.array_equal(buf[self.bs:self.bs + self.bl], wrong), \
+            "precondition: wrong majority silently written into buf"
+
+        # Not due yet -> nothing happens.
+        self.guard.cliff_anchor_if_due(buf, tick=4)
+        assert self.guard._cliff_anchor_checked == 0
+
+        # Due -> caught from persistent storage, independent of the poisoned CRC.
+        self.guard.cliff_anchor_if_due(buf, tick=5)
+        assert self.guard._cliff_anchor_checked == 1
+        assert self.guard._cliff_anchor_mismatch == 1
+        assert self.guard._cliff_reload_triggered == 1
+        assert np.array_equal(buf[self.bs:self.bs + self.bl], self._clean_rot())
+        assert self.guard._rot_clean_crc == zlib.crc32(bytes(self._clean_rot())), \
+            "reload must self-heal the poisoned in-memory CRC anchor"
+
+    def test_anchor_switch_off_leaves_silent_error(self):
+        """anchor_every=0 → the silent wrong vote is NOT caught (the switch controls it)."""
+        cfg = {**self.cfg, "anchor_every": 0}
+        guard = RecoveryGuard(adapter, cfg, self.rmap)
+        guard.init_from_clean(self.clean_buf)
+        buf = self.clean_buf.copy()
+        guard._rot_copies[0][0] ^= 0b00000001
+        guard._rot_copies[1][0] ^= 0b00000001
+        wrong = np.array(self._clean_rot(), dtype=np.uint8)
+        wrong[0] ^= 0b00000001
+        guard._rot_clean_crc = zlib.crc32(bytes(wrong))
+
+        guard._scrub_cliff(buf)
+        for tick in range(1, 21):
+            guard.cliff_anchor_if_due(buf, tick)
+        assert guard._cliff_anchor_checked == 0
+        assert guard._cliff_anchor_mismatch == 0
+        assert np.array_equal(buf[self.bs:self.bs + self.bl], wrong), \
+            "with the backstop off the wrong bytes must persist (validates the switch)"
+
+    def test_cliff_scrub_off_keeps_legacy_fuse(self):
+        """cliff_scrub=False → run-4 fuse semantics unchanged (irrecoverable, no reload)."""
+        guard, clean = _guard(self.rmap, {**E5_SMOKE_CFG, "R": 3, "chunk_size": 16})
+        buf = clean.copy()
+        guard._rot_copies[0][0] ^= 0b00000001
+        guard._rot_copies[1][0] ^= 0b00000001
+        guard._scrub_cliff(buf)
+        assert guard._cliff_irrecoverable == 1
+        assert guard._cliff_reload_triggered == 0
+        # anchor is inert without cliff_scrub even if anchor_every is set
+        guard.cliff_anchor_if_due(buf, tick=10)
+        assert guard._cliff_anchor_checked == 0
+
+    def test_read_serialized_range_semantics(self):
+        """Adapter clean-source reads match the serialized bytes and are independent copies."""
+        full = adapter.serialize_index()
+        a = adapter.read_serialized_range(self.bs, self.bl)
+        assert np.array_equal(a, full[self.bs:self.bs + self.bl])
+        a[0] ^= 0xFF
+        b = adapter.read_serialized_range(self.bs, self.bl)
+        assert np.array_equal(b, full[self.bs:self.bs + self.bl]), \
+            "mutating a returned array must not affect subsequent reads (fresh copy per call)"
+
+
 # ---------------------------------------------------------------------------
 # E5 slope tests
 # ---------------------------------------------------------------------------
@@ -628,6 +762,7 @@ class TestMiniTimeline:
 
         REQUIRED_COUNTER_KEYS = {
             "cliff_checked", "cliff_repaired", "cliff_irrecoverable",
+            "cliff_reload_triggered", "cliff_anchor_checked", "cliff_anchor_mismatch",
             "slope_checked", "slope_failed", "slope_reloaded",
             "known_corrupted", "eb_fraction", "oob_elements",
         }

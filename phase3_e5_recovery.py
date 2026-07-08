@@ -13,6 +13,10 @@ Layer behaviour:
   Cliff (rotation, 64 B, global):
     Maintains R=3 copies. Per-query majority-vote + CRC verify → repair buf + copies.
     Flags irrecoverable (≥ majority copies corrupted same way: CRC of majority ≠ clean).
+    With cfg["cliff_scrub"]: vote failure instead triggers a FULL reload of buf + all
+    replicas from the persistent clean source (adapter file read, never cached), plus a
+    low-frequency anchor check every cfg["anchor_every"] ticks as a backstop for silent
+    wrong majorities (CRC collision / corrupted in-memory CRC anchor).
 
   Slope (ex_code data, per-chunk CRC-32):
     Per-call CRC check on configurable chunk_size (default 4096 B).
@@ -33,7 +37,7 @@ import zlib
 
 import numpy as np
 
-from qp import config, metrics
+from qp import config, metrics, provenance
 from qp.rabitq import layout
 from qp.rabitq.registry import get_adapter, adapter_name
 
@@ -47,6 +51,9 @@ SMOKE_CFG = {
     "bounds_sample": 16,       # number of elements to scan for OOB pointers
     "ef": config.EF if hasattr(config, "EF") else 2000,
     "seed": config.SEED,
+    "cliff_scrub": False,      # vote-failure-triggered full reload from the clean source
+    "anchor_every": 10,        # low-frequency anchor check period in ticks (0 = off);
+                               # only active when cliff_scrub is on
 }
 FULL_CFG = {**SMOKE_CFG, "ticks": 100}
 
@@ -74,6 +81,14 @@ class RecoveryGuard:
         self._cliff_checked = 0
         self._cliff_repaired = 0
         self._cliff_irrecoverable = 0
+        self._cliff_reload_triggered = 0
+        self._cliff_anchor_checked = 0
+        self._cliff_anchor_mismatch = 0
+        if cfg.get("cliff_scrub", False) and not hasattr(adapter, "read_serialized_range"):
+            raise RuntimeError(
+                "REPORT-AND-STOP: cliff_scrub needs adapter.read_serialized_range (persistent "
+                "clean source); refusing to fall back to an in-memory snapshot, which would "
+                "just be a fourth corruptible replica.")
 
         # Slope state
         self._ex_region = self._find_region_ex()            # (byte_start, byte_len) or None
@@ -129,15 +144,8 @@ class RecoveryGuard:
         k = k or config.K
         ef = int(self._cfg.get("ef", 2000))
 
-        # 1. Cliff: per-query majority-vote repair
-        self._scrub_cliff(buf)
-
-        # 2. Slope: per-chunk CRC check
-        if self._ex_region is not None:
-            self._check_ex_crc(buf)
-
-        # 3. Bounds check: scan sample of pointer fields
-        self._bounds_check(buf)
+        # 1-3. Cliff scrub, slope CRC, bounds check
+        self._pre_search_scrub(buf)
 
         # 4. Serialize to tmp file
         self._adapter.deserialize_index(buf, tmp_path)
@@ -148,13 +156,33 @@ class RecoveryGuard:
             seed = int(self._cfg.get("seed", config.SEED))
             res = self._adapter.search_with_eb_fallback(
                 tmp_path, eb_frac, seed=seed if self._aname == "real" else 0,
-                k=k, ef=ef, out_path=None, timeout=timeout)
+                k=k, ef=ef, out_path=tmp_path + ".eb.ivecs", timeout=timeout)
         else:
             out_p = tmp_path + ".ids.ivecs"
             res = self._adapter.search_corrupted(
                 tmp_path, k=k, ef=ef, out_path=out_p, timeout=timeout)
 
         return res
+
+    def _pre_search_scrub(self, buf):
+        """Steps 1-3 of search_with_recovery: cliff scrub, slope CRC, bounds check."""
+        # 1. Cliff: per-query majority-vote repair
+        self._scrub_cliff(buf)
+
+        # 2. Slope: per-chunk CRC check
+        if self._ex_region is not None:
+            self._check_ex_crc(buf)
+
+        # 3. Bounds check: scan sample of pointer fields
+        self._bounds_check(buf)
+
+    def scrub_only(self, buf):
+        """Run the per-query recovery layers without deserializing/searching.
+
+        For --no-recall runs (e.g. the multi-seed fuse-distribution batch) where only the
+        counter timeline matters — skips the expensive C++ search entirely.
+        """
+        self._pre_search_scrub(buf)
 
     def rotation_replicas(self):
         """The live R rotation copies (mutable arrays) — exposed for --inject-replicas.
@@ -184,6 +212,9 @@ class RecoveryGuard:
             "cliff_checked": self._cliff_checked,
             "cliff_repaired": self._cliff_repaired,
             "cliff_irrecoverable": self._cliff_irrecoverable,
+            "cliff_reload_triggered": self._cliff_reload_triggered,
+            "cliff_anchor_checked": self._cliff_anchor_checked,
+            "cliff_anchor_mismatch": self._cliff_anchor_mismatch,
             "slope_checked": self._slope_checked,
             "slope_failed": self._slope_failed,
             "slope_reloaded": self._slope_reloaded,
@@ -225,6 +256,15 @@ class RecoveryGuard:
         # NOT write the wrong majority into buf (plan §5a: detect, never silently serve a wrong
         # value). buf is left as-is for the search to proceed under the loud failure flag.
         if zlib.crc32(bytes(majority)) != self._rot_clean_crc:
+            if self._cfg.get("cliff_scrub", False):
+                # Vote failure = action signal (same philosophy as slope CRC-fail -> fallback
+                # and bounds-fail -> skip): full reload of buf + ALL replicas from the clean
+                # source. Not counted as irrecoverable — the event is recovered. Return
+                # immediately: the computed majority/repaired_bits are stale and wrong.
+                _log(f"[e5] cliff vote failure (≥{(R+1)//2} copies corrupted same way) "
+                     f"→ full reload from clean source")
+                self._reload_cliff(buf)
+                return
             self._cliff_irrecoverable += 1
             _log(f"[e5] IRRECOVERABLE: majority-vote rotation result fails clean CRC "
                  f"(≥{(R+1)//2} copies corrupted same way); buf left unrepaired, not served as fixed")
@@ -235,6 +275,52 @@ class RecoveryGuard:
             buf[bs: bs + bl] = majority
             for r in range(R):
                 np.copyto(self._rot_copies[r], majority)
+
+    def _reload_cliff(self, buf):
+        """Full reload of the rotation (main buf + ALL R replicas) from the clean source.
+
+        The clean source is read fresh from persistent storage every call (adapter file
+        offset, 64 B) — never cached: a DRAM cache of the clean rotation would just be a
+        fourth replica subject to the same fault process. Full-region reload (not just the
+        failed bit) is deliberate: at first vote failure the replicas already carry other
+        accumulated, not-yet-aligned damage that would re-trigger immediately.
+
+        Writes are IN PLACE (np.copyto / slice assign): the runner's replica corruptors
+        and TemporalCorruptor hold references to these exact arrays.
+        """
+        bs, bl = self._rot_region
+        clean = self._adapter.read_serialized_range(bs, bl)
+        buf[bs: bs + bl] = clean
+        for r in range(len(self._rot_copies)):
+            np.copyto(self._rot_copies[r], clean)
+        # Re-derive the CRC anchor from the freshly read clean bytes: this self-heals a
+        # corrupted in-memory anchor (the CRC itself lives in DRAM and can be hit too).
+        self._rot_clean_crc = zlib.crc32(bytes(clean))
+        self._cliff_reload_triggered += 1
+        assert np.array_equal(np.asarray(buf[bs: bs + bl], dtype=np.uint8), clean), \
+            "post-reload verify failed: buf rotation != clean source"
+
+    def cliff_anchor_if_due(self, buf, tick):
+        """Low-frequency anchor check: every anchor_every ticks, byte-compare the main
+        buf's rotation region against the clean source read from persistent storage.
+
+        Backstop for the theoretical blind spot of the trigger path: a wrong majority
+        that slips past the CRC verify (CRC collision, or a corrupted in-memory CRC
+        anchor) produces no vote-failure signal. This check depends ONLY on persistent
+        storage — deliberately not on _rot_clean_crc.
+        """
+        if not self._cfg.get("cliff_scrub", False):
+            return
+        every = int(self._cfg.get("anchor_every", 10))
+        if every <= 0 or tick <= 0 or tick % every != 0:
+            return
+        bs, bl = self._rot_region
+        clean = self._adapter.read_serialized_range(bs, bl)
+        self._cliff_anchor_checked += 1
+        if not np.array_equal(np.asarray(buf[bs: bs + bl], dtype=np.uint8), clean):
+            self._cliff_anchor_mismatch += 1
+            _log(f"[e5] cliff anchor mismatch at tick {tick} → full reload from clean source")
+            self._reload_cliff(buf)
 
     # ------------------------------------------------------------------
     # Slope layer internals
@@ -444,9 +530,12 @@ def run(args):
         cfg["ticks"] = int(args.ticks)
     cfg["seed"] = args.seed
     cfg["parity_on"] = args.parity_on
+    cfg["cliff_scrub"] = bool(getattr(args, "cliff_scrub", False))
+    if getattr(args, "anchor_every", None) is not None:
+        cfg["anchor_every"] = int(args.anchor_every)
 
-    out_dir = os.path.join(config.ROOT, "artifacts_smoke" if args.smoke else "artifacts",
-                           "phase3", "e5")
+    out_dir = getattr(args, "out_dir", None) or os.path.join(
+        config.ROOT, "artifacts_smoke" if args.smoke else "artifacts", "phase3", "e5")
     os.makedirs(out_dir, exist_ok=True)
 
     from phase3_e3c_temporal import TemporalCorruptor, _resolve_region, region_label
@@ -457,6 +546,7 @@ def run(args):
     clean_buf = adapter.serialize_index()
     rmap = adapter.region_map()
     gt = adapter.load_groundtruth()
+    no_recall = bool(getattr(args, "no_recall", False))
 
     guard = RecoveryGuard(adapter, cfg, rmap)
     guard.init_from_clean(clean_buf)
@@ -480,14 +570,30 @@ def run(args):
 
     print(f"[e5] adapter={aname} region={rlabel} pattern={args.pattern} "
           f"ticks={cfg['ticks']} parity_on={cfg['parity_on']} "
-          f"inject_replicas={inject_replicas}")
+          f"inject_replicas={inject_replicas} cliff_scrub={cfg['cliff_scrub']} "
+          f"no_recall={no_recall}")
 
     records = []
-    # --inject-replicas runs get their own filenames — never clobber the baseline records.
-    stem = f"e5_{args.pattern}_{rlabel}" + ("_replicas" if inject_replicas else "")
+    # --inject-replicas / --cliff-scrub / --out-tag runs get their own filenames — never
+    # clobber earlier runs' records (run 4's *_replicas.* is the main figure's 3rd line).
+    stem = (f"e5_{args.pattern}_{rlabel}"
+            + ("_replicas" if inject_replicas else "")
+            + ("_scrub" if cfg["cliff_scrub"] else "")
+            + (f"_{args.out_tag}" if getattr(args, "out_tag", None) else ""))
     raw_path = os.path.join(out_dir, f"{stem}.records.jsonl")
     with tempfile.NamedTemporaryFile(suffix=".index", delete=False) as tmp_f:
         tmp_path = tmp_f.name
+
+    # Provenance stamped NOW, before any corruption (never backfill). The clean-baseline
+    # search doubles as the platform_confirmed_real triangulation input; explicit per-run
+    # out_path so parallel seed-batch processes never share a scratch file.
+    adapter.deserialize_index(clean_buf, tmp_path)
+    clean_res = adapter.search_corrupted(tmp_path, k=config.K, ef=int(cfg["ef"]),
+                                         out_path=tmp_path + ".clean.ivecs")
+    clean_recall = float(metrics.recall_at_k(clean_res["ids"], gt, config.K)) \
+        if clean_res.get("ids") is not None else None
+    meta = provenance.collect_provenance(
+        adapter, aname, {"recall@10": clean_recall}, cfg, args, rmap)
 
     try:
         with open(raw_path, "w") as raw_f:
@@ -502,9 +608,18 @@ def run(args):
                         # independent stream per replica: same process, different seed lane
                         rc.inject_step(copy, args.pattern, seed ^ ((r + 1) * 0x5EED))
 
-                res = guard.search_with_recovery(buf, tmp_path)
-                ids = res.get("ids")
-                recall = float(metrics.recall_at_k(ids, gt, config.K)) if ids is not None else None
+                # Low-frequency anchor backstop BEFORE the search, so this tick's row
+                # counters already reflect an anchor-triggered reload.
+                guard.cliff_anchor_if_due(buf, tick)
+
+                if no_recall:
+                    guard.scrub_only(buf)
+                    res, recall = {}, None
+                else:
+                    res = guard.search_with_recovery(buf, tmp_path)
+                    ids = res.get("ids")
+                    recall = (float(metrics.recall_at_k(ids, gt, config.K))
+                              if ids is not None else None)
 
                 ctr = guard.counters()
                 row = {"tick": tick, "cumulative_corruption": cc,
@@ -520,18 +635,23 @@ def run(args):
                 guard.scrub_if_due(buf, tick)
 
                 if tick % 5 == 0 or tick == cfg["ticks"] - 1:
+                    rtxt = f"{recall:.4f}" if recall is not None else "n/a"
                     print(f"  tick={tick:3d}  bits={cc['bits_flipped']:4d}  "
-                          f"recall={recall:.4f}  cliff_repaired={ctr['cliff_repaired']}  "
+                          f"recall={rtxt}  cliff_repaired={ctr['cliff_repaired']}  "
+                          f"cliff_reload={ctr['cliff_reload_triggered']}  "
                           f"slope_failed={ctr['slope_failed']}")
     finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        for p in (tmp_path, tmp_path + ".clean.ivecs", tmp_path + ".ids.ivecs",
+                  tmp_path + ".eb.ivecs"):
+            if os.path.exists(p):
+                os.unlink(p)
 
     summary = {
         "pattern": args.pattern, "region": rlabel, "ticks": cfg["ticks"],
         "final_counters": records[-1]["counters"] if records else {},
         "final_recall@10": records[-1]["recall@10"] if records else None,
-        "adapter": aname, "cfg": cfg,
+        "clean_recall@10": clean_recall,
+        "adapter": aname, "cfg": cfg, "meta": meta,
     }
     if inject_replicas:
         summary["inject_replicas"] = True
@@ -555,6 +675,20 @@ def main():
     ap.add_argument("--inject-replicas", dest="inject_replicas", action="store_true",
                     help="also corrupt the R=3 rotation replicas each tick (same process, "
                          "independent streams) — measures majority-vote failure boundary")
+    ap.add_argument("--cliff-scrub", dest="cliff_scrub", action="store_true",
+                    help="vote-failure-triggered full reload of buf + all replicas from the "
+                         "persistent clean source (turns the one-shot fuse into a self-scrubbing "
+                         "mechanism); adds the '_scrub' filename suffix")
+    ap.add_argument("--anchor-every", dest="anchor_every", type=int, default=None,
+                    help="low-frequency anchor check period in ticks (default cfg=10; 0=off; "
+                         "only active with --cliff-scrub)")
+    ap.add_argument("--no-recall", dest="no_recall", action="store_true",
+                    help="skip the per-tick search (counters only) — minutes -> seconds per run; "
+                         "clean baseline is still measured once for provenance")
+    ap.add_argument("--out-tag", dest="out_tag", default=None,
+                    help="extra filename suffix (e.g. seed1007) so batch runs shard cleanly")
+    ap.add_argument("--out-dir", dest="out_dir", default=None,
+                    help="override output directory (default artifacts/phase3/e5)")
     args = ap.parse_args()
     run(args)
 

@@ -92,6 +92,19 @@ def byte_size(path=None):
     return int(_PRISTINE.size)
 
 
+def read_serialized_range(byte_start, byte_len, path=None):
+    """Read byte_len bytes at byte_start from the clean source (ignores `path`).
+
+    _PRISTINE stands in for persistent storage here: on the real adapter this is a
+    fresh file read every call (never cached), because the clean source's value is
+    that it lives outside DRAM. Returns a fresh copy so callers can't alias it.
+    """
+    bs, bl = int(byte_start), int(byte_len)
+    if bs < 0 or bs + bl > int(_PRISTINE.size):
+        raise IOError(f"range ({bs}, {bl}) outside pristine buffer of {_PRISTINE.size} B")
+    return _PRISTINE[bs:bs + bl].copy()
+
+
 def read_header(path=None):
     return layout.parse_header(bytes(_PRISTINE[:layout.HEADER_BYTES]))
 

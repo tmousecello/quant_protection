@@ -160,7 +160,10 @@ is the human decision recorded in `artifacts/phase3/plan/stage2_plan1.md` when E
 |-----|---------|
 | `cliff_checked` | rotation bits checked (64B × 8 per search call) |
 | `cliff_repaired` | bits corrected across copies + buf by majority-vote |
-| `cliff_irrecoverable` | searches where majority-vote result failed clean CRC |
+| `cliff_irrecoverable` | searches where majority-vote result failed clean CRC and was NOT recovered (with `--cliff-scrub` a vote failure triggers a reload instead and does not count here) |
+| `cliff_reload_triggered` | full reloads of buf + all replicas from the persistent clean source (vote-failure trigger or anchor mismatch; stage-3 `--cliff-scrub`) |
+| `cliff_anchor_checked` | low-frequency anchor checks performed (buf rotation vs clean source, every `anchor_every` ticks) |
+| `cliff_anchor_mismatch` | anchor checks that found buf ≠ clean source (silent wrong majority caught) |
 | `slope_checked` | ex_code chunks CRC-checked |
 | `slope_failed` | chunks that failed CRC this run |
 | `slope_reloaded` | chunks batch-reloaded (lazy scrub) |

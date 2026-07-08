@@ -1,0 +1,122 @@
+{
+  "all_pass": true,
+  "adapter": "real",
+  "gates": [
+    {
+      "gate": 1,
+      "name": "build",
+      "pass": true,
+      "detail": "binaries_built=True, usage_has_recovery=True"
+    },
+    {
+      "gate": 2,
+      "name": "clean no-op anchor",
+      "pass": true,
+      "detail": "none: recall=0.98376, ids_same=True, crc_fail_zero=True; drop: recall=0.98376, ids_same=True, crc_fail_zero=True; fallback_eb: recall=0.98376, ids_same=True, crc_fail_zero=True"
+    },
+    {
+      "gate": 3,
+      "name": "F3 5% fallback_eb anchor",
+      "pass": true,
+      "detail": "recall=0.94329 vs anchor=0.941865 \u00b10.01 (50000 elements corrupted)"
+    },
+    {
+      "gate": 4,
+      "name": "ordering eb>=drop, none worst (severe damage)",
+      "pass": true,
+      "detail": "severe(384 flips/elem): none=0.12689, drop=0.79597, fallback_eb=0.81425; informational light(4 flips/elem): none=0.9055199999999999, drop=0.79739, fallback_eb=0.8163199999999999"
+    },
+    {
+      "gate": 5,
+      "name": "determinism (same seed -> same ids)",
+      "pass": true,
+      "detail": "elements_same=True, ids_same=True"
+    }
+  ],
+  "meta": {
+    "adapter_type": "real",
+    "platform": {
+      "machine": "x86_64",
+      "system": "Linux",
+      "hostname": "meow1",
+      "uname": [
+        "Linux",
+        "meow1",
+        "6.17.0-19-generic",
+        "#19-Ubuntu SMP PREEMPT_DYNAMIC Fri Mar  6 14:02:58 UTC 2026",
+        "x86_64"
+      ]
+    },
+    "platform_confirmed_real": true,
+    "confirmation_basis": [
+      "adapter_resolved=real",
+      "platform.machine()=x86_64",
+      "clean@10=0.98376 vs expected=0.983 -> tolerance_ok=True"
+    ],
+    "clean_baseline": {
+      "recall@10": 0.98376,
+      "expected": 0.983,
+      "diff": 0.00076,
+      "tolerance_ok": true,
+      "tol": 0.01
+    },
+    "index_geometry": {
+      "dim": 128,
+      "padded_dim": 128,
+      "num_cluster": 16,
+      "ex_bits": 6,
+      "cur_element_count": 1000000,
+      "M": 16,
+      "maxM": 16,
+      "maxM0": 32,
+      "ef_construction": 200
+    },
+    "rabitq": {
+      "library_commit": "7e39df2fcff6161af5c4a77cc3dd1709684fb52b",
+      "binaries_built_flag": true,
+      "note": "binaries_built is NOT a platform signal (stub returns True); platform is confirmed via platform_confirmed_real"
+    },
+    "study_config": {
+      "seed": 1234,
+      "k": 10,
+      "dim": 128,
+      "ef": 2000,
+      "smoke": false
+    },
+    "deps": {
+      "numpy": "2.4.6",
+      "faiss": "1.14.2"
+    },
+    "units": {
+      "pct_collapse": "percent_0_100",
+      "pct_collapse_worst_bucket": "percent_0_100",
+      "pct_collapse_overall": "percent_0_100",
+      "pct_harmful": "percent_0_100",
+      "pct_crash": "percent_0_100",
+      "pct_catastrophic": "percent_0_100",
+      "pct_benign": "percent_0_100",
+      "frac_collapse_worst_bucket": "fraction_0_1",
+      "frac_collapse_overall": "fraction_0_1",
+      "p1_single_bit_collapse": "fraction_0_1",
+      "collapse_frac": "fraction_0_1",
+      "predicted": "fraction_0_1",
+      "measured": "fraction_0_1",
+      "dRecall@10": "abs_recall_delta_0_1",
+      "mean_dRecall@10": "abs_recall_delta_0_1",
+      "max_dRecall@10": "abs_recall_delta_0_1",
+      "p99_dRecall@10": "abs_recall_delta_0_1"
+    },
+    "corruption": {
+      "index_sha256": "fed2b2454a80be9e0b765913361cb89815c08bfd43093e87a78bb3904e88dd26",
+      "corrupted_regions": [
+        "ex_code"
+      ],
+      "recovery": [
+        "none",
+        "drop",
+        "fallback_eb"
+      ],
+      "crc_manifest_sha256": "6c6ca3f6c9a41ee7b6a4092b9f07452a4bab5ed55a322cd62e17498168328a3f"
+    }
+  }
+}

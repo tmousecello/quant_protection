@@ -130,3 +130,61 @@ E5 對這兩類做相反的恢復;E3c 提供讓它們隨時間累積壞掉的故
 - **科學驗收(人類,x86)**:冒煙過 → 進實驗 A/B。
 
 交付後回報「E5+E3c stub 全綠 + 契約可組合 + runbook 就緒」,等工作站冒煙與實驗 A/B。
+---
+
+## 10. 結果報告(x86 工作站真跑,2026-07-04 整理)
+
+依 `E5_RUNBOOK.md` §When Done 回報。所有數字取自
+`artifacts/phase3/e3c/e3c_uniform_accum_rotation.{json,records.jsonl}`、
+`artifacts/phase3/e5/e5_uniform_accum_rotation.{json,records.jsonl}`、
+`artifacts/phase3/{e3c,e5}_full_run.log`,對照 E3a/E3b 既有量測。
+
+### 10.1 冒煙狀態
+
+| 冒煙 | 結果 | 證據 |
+|---|---|---|
+| A — E3c rotation 累積 | ✅ 過 | 累積單調(僅 4 次雙翻抵銷,允許);`reset OK (drift=0)` → XOR-toggle 正確 |
+| B — E5 rotation 懸崖層 | ✅ 過 | recall 恆 0.98376;`cliff_irrecoverable=0` |
+| C — E5 ex_code 斜坡層 | ⛔ REPORT-AND-STOP(如設計) | 真 adapter 的 `search_with_eb_fallback` 在第一個 CRC fail 即 raise;`artifacts_smoke/phase3/e5/e5_uniform_accum_ex_code@elem0.records.jsonl` 為 0 byte(誠實停在 elem0,無造假輸出) |
+
+### 10.2 實驗 A — time-to-cliff(rotation, uniform_accum, p=0.005, 100 ticks, seed=1234, real adapter, R=3)
+
+**無 E5(E3c 基線)累積軌跡**(rotation 共 512 bits):
+
+| tick | 0 | 2 | 10 | 20 | 50 | 99 |
+|---|---|---|---|---|---|---|
+| 累積相異 bits | 6 | 13 | 31 | 50 | 103 | 165 (32.2%) |
+
+E3c 腳本只記腐蝕、不量 recall,故「無 E5 的崩潰 tick」用 E3a 實測崩潰曲線映射:
+k=4 bits → 32.5% 崩潰機率、k=8 → 100% 崩潰(E3b:16-bit uniform → collapse_frac 1.0、mean ΔRecall@10 = 0.81、0 crash)。
+
+- **tick 0** 即累積 6 bits ≥ 4 → 已進崩潰區(~1/3 機率沉默崩潰)。
+- **tick 2** 累積 13 bits ≥ 8 → 超過 100% 崩潰預算。
+- **無 E5 的 time-to-cliff ≤ 2 ticks**(物理錯誤數 6–13 bits)。
+
+**有 E5 懸崖層**:
+
+- recall@10 = **0.98376,100 個 tick 全程持平**(等於乾淨基線,無任何下跌)。
+- 235/235 注入翻轉全數修復(`cliff_repaired=235`);`cliff_irrecoverable=0`;單 tick 殘留腐蝕最高 8 bits,均在該 tick 的 on-access scrub 清掉。
+- **有 E5 的 time-to-cliff > 100 ticks(未到崖)**;此時未防護版本已累積 165 相異 bits(區域的 32%)。
+- **懸崖護欄至少買到 98+ ticks(> 50× 壽命)**;在此錯誤率下,只要複本儲存獨立,實質上無限延壽。
+
+**帳目核對**(同 seed 同腐蝕流,帳完全對得起來):
+- E3c 原始翻轉事件 235 == E5 `cliff_repaired` 235。
+- E3c 淨相異 165 < 235:70 次事件落在已翻的 bit 上(觀測到 4 次淨抵銷:tick 48/60/67/71)。
+
+**誠實邊界(caveats)**:
+1. E3c 腐蝕流只打**被服務的 buf**;R=3 複本存於獨立記憶體、從未被注入(`phase3_e5_recovery.py:474`)。故 `cliff_irrecoverable=0` 是**構造上必然**——本實驗量的是 per-access 修復覆蓋率,不是複本同時失效的多數決邊界(該邊界已在 stub 單元測試標記驗證,§5a)。
+2. 「無 E5 崩潰 tick」是**推導值**(E3c bits 軌跡 × E3a 崩潰曲線),非直接量測——若要直接數字,需替無恢復基線加 recall 時間線。
+
+### 10.3 實驗 B — ex 斜坡 + EB recall 曲線:**未執行(blocked)**
+
+- 依 runbook §Design Gap:真 `exp_faultinject` 無法對呼叫端提供的已腐蝕 index 排序,EB 排序需 C++ 查詢期量(`est_dist`、`g_error`),Python 端不可跑。`search_with_eb_fallback` 現為 raise(先前 Option A 包裝會二次注入,已移除)。
+- **採用的 EB gap 選項:尚無**——需先建 **Option B**(patch `exp_dumpids` 加 `--recovery fallback_eb`,C++ 工作站建置)。**EB recall delta:N/A**。
+- 4-pattern sweep(uniform/clustered/cross_row/burst_accum)待 Option B 建好後執行。
+
+### 10.4 下一步
+
+1. 工作站建 Option B → 跑實驗 B 4-pattern sweep(EB-fraction vs recall 曲線)。
+2. (選)給無恢復基線加 per-tick recall 量測,把實驗 A 的「≤2 ticks」從推導變直接量測。
+3. 完成後進 Stage 2 第二輪:RaBitQ vs IVF_SQ8 斜坡敏感度跨索引比較。

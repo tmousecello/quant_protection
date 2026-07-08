@@ -1,0 +1,20 @@
+{
+  "pattern": "uniform_accum",
+  "region": "rotation",
+  "ticks": 100,
+  "final_bits_flipped": 165,
+  "final_fraction": 0.322265625,
+  "adapter": "real",
+  "cfg": {
+    "ticks": 100,
+    "p": 0.005,
+    "W": 32,
+    "k": 4,
+    "n_win": 2,
+    "stride": 8,
+    "burst_tick": 5,
+    "burst_n": 20,
+    "region": "rotation",
+    "seed": 1234
+  }
+}

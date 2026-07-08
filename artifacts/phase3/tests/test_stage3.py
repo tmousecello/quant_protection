@@ -16,6 +16,13 @@ if _ROOT not in sys.path:
 from phase3_e5_seed_batch import (first_fail_tick, summarize_first_fails,
                                   analytic_estimate, records_identical,
                                   batch_record_files, STEM_RE)
+from phase3_f_synth import (align_timelines, tolerance_curves, interp_recall,
+                            solve_fstar, interval_ratio, fstar_table,
+                            average_measured_at_fraction, run_check_gates,
+                            _light_expb_records, RMIN_GRID)
+
+_EXPB_DIR = os.path.join(_ROOT, "artifacts", "phase3", "expb")
+_HAVE_EXPB = os.path.isfile(os.path.join(_EXPB_DIR, "expb_summary.json"))
 
 
 def _rows(irrecoverable_by_tick):
@@ -95,3 +102,122 @@ class TestBatchFileDiscovery:
         assert sorted(found) == [1000, 1001]
         assert STEM_RE.search(names[2]) is None
         assert STEM_RE.search(names[3]) is None
+
+
+# ---------------------------------------------------------------------------
+# F synthesis (#3)
+# ---------------------------------------------------------------------------
+
+def _expb_row(pattern, fraction, recovery, recall):
+    return {"pattern": pattern, "fraction": fraction, "recovery": recovery,
+            "recall@10": recall}
+
+
+class TestInterpolation:
+    CURVE = [(0.0, 1.0), (0.1, 0.9), (0.3, 0.5)]
+
+    def test_interp_midpoint(self):
+        assert interp_recall(self.CURVE, 0.05) == pytest.approx(0.95)
+        assert interp_recall(self.CURVE, 0.2) == pytest.approx(0.7)
+
+    def test_interp_out_of_range_raises(self):
+        with pytest.raises(ValueError):
+            interp_recall(self.CURVE, 0.4)
+
+    def test_solve_fstar_linear_inverse(self):
+        assert solve_fstar(self.CURVE, 0.95) == pytest.approx(0.05)
+        assert solve_fstar(self.CURVE, 0.7) == pytest.approx(0.2)
+
+    def test_solve_fstar_below_range_returns_none(self):
+        assert solve_fstar(self.CURVE, 0.4) is None
+
+    def test_interval_ratio(self):
+        assert interval_ratio(0.101, 0.093) == pytest.approx(
+            __import__("math").log(1 - 0.101) / __import__("math").log(1 - 0.093))
+        assert interval_ratio(0.1, 0.1) == pytest.approx(1.0)
+
+
+class TestToleranceCurves:
+    def test_pattern_average_and_clean_anchor(self):
+        rows = [
+            _expb_row("uniform_accum", 0.05, "drop", 0.94),
+            _expb_row("burst_accum", 0.05, "drop", 0.90),
+            _expb_row("uniform_accum", 0.20, "drop", 0.60),
+            _expb_row("burst_accum", 0.20, "drop", 0.80),
+        ]
+        curves = tolerance_curves(rows, clean_recall=0.98)
+        assert curves["drop"] == [(0.0, 0.98), (0.05, pytest.approx(0.92)),
+                                  (0.20, pytest.approx(0.70))]
+
+    def test_measured_average_at_fraction(self):
+        rows = [
+            _expb_row("uniform_accum", 0.101, "fallback_eb", 0.90),
+            _expb_row("burst_accum", 0.101, "fallback_eb", 0.92),
+            _expb_row("uniform_accum", 0.101, "drop", 0.88),
+            _expb_row("uniform_accum", 0.05, "fallback_eb", 0.95),   # other f: excluded
+        ]
+        avg = average_measured_at_fraction(rows, 0.101)
+        assert avg["fallback_eb"] == pytest.approx(0.91)
+        assert avg["drop"] == pytest.approx(0.88)
+
+
+class TestAlignTimelines:
+    def test_shorter_series_padded_with_none(self):
+        series = {"a": [(0, 1.0), (1, 0.9)], "b": [(0, 0.5)]}
+        rows = align_timelines(series)
+        assert rows == [{"tick": 0, "a": 1.0, "b": 0.5},
+                        {"tick": 1, "a": 0.9, "b": None}]
+
+
+class TestCheckGates:
+    PRED = {"headline_fraction": 0.101,
+            "pred_eb_at_headline": 0.8997, "pred_drop_at_headline": 0.8919}
+    CLIFF_OK = {"deterministic_6bit": {"collapse": True, "delta": 0.002},
+                "k8": {"collapse": True}}
+
+    def test_all_pass(self):
+        ok, gates = run_check_gates({"fallback_eb": 0.902, "drop": 0.885},
+                                    self.PRED, self.CLIFF_OK)
+        assert ok and all(g["ok"] for g in gates)
+
+    def test_gate_a_fails_beyond_tolerance(self):
+        ok, gates = run_check_gates({"fallback_eb": 0.92, "drop": 0.885},
+                                    self.PRED, self.CLIFF_OK)
+        assert not ok
+        assert not next(g for g in gates if g["gate"] == "a_headline_eb")["ok"]
+
+    def test_gate_b_requires_direction(self):
+        # drop within tolerance of its prediction but NOT below eb -> direction fails
+        ok, gates = run_check_gates({"fallback_eb": 0.890, "drop": 0.891},
+                                    self.PRED, self.CLIFF_OK)
+        assert not next(g for g in gates if g["gate"] == "b_drop_control")["ok"]
+
+    def test_gate_c_needs_collapse_and_delta(self):
+        bad = {"deterministic_6bit": {"collapse": True, "delta": 0.05},
+               "k8": {"collapse": True}}
+        ok, gates = run_check_gates({"fallback_eb": 0.902, "drop": 0.885},
+                                    self.PRED, bad)
+        assert not next(g for g in gates if g["gate"] == "c_cliff")["ok"]
+
+
+@pytest.mark.skipif(not _HAVE_EXPB, reason="expb artifacts only on the workstation")
+class TestSection72Reproduction:
+    """The pinned interpolation must reproduce E3C_E5_ANALYSIS.md §7.2 to table precision."""
+
+    EXPECTED = {  # r_min: (fstar_drop, fstar_eb, ratio) as printed in the doc
+        0.97: (0.016, 0.017, 1.06), 0.95: (0.039, 0.041, 1.07),
+        0.90: (0.093, 0.101, 1.09), 0.85: (0.145, 0.159, 1.11),
+        0.80: (0.197, 0.219, 1.13), 0.70: (0.298, 0.342, 1.18),
+        0.60: (0.400, 0.465, 1.23),
+    }
+
+    def test_table_reproduced(self):
+        with open(os.path.join(_EXPB_DIR, "expb_summary.json")) as fh:
+            clean = json.load(fh)["clean_recall@10"]
+        rows = _light_expb_records(_EXPB_DIR)
+        curves = tolerance_curves(rows, clean)
+        for r in fstar_table(curves, RMIN_GRID):
+            exp_drop, exp_eb, exp_ratio = self.EXPECTED[r["r_min"]]
+            assert r["fstar_drop"] == pytest.approx(exp_drop, abs=5e-4), r
+            assert r["fstar_eb"] == pytest.approx(exp_eb, abs=5e-4), r
+            assert r["interval_ratio"] == pytest.approx(exp_ratio, abs=5e-3), r

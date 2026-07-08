@@ -1,0 +1,28 @@
+{
+  "pattern": "uniform_accum",
+  "region": "rotation",
+  "ticks": 100,
+  "final_counters": {
+    "cliff_checked": 51200,
+    "cliff_repaired": 235,
+    "cliff_irrecoverable": 0,
+    "slope_checked": 100,
+    "slope_failed": 0,
+    "slope_reloaded": 0,
+    "known_corrupted": 0,
+    "eb_fraction": 0.0,
+    "oob_elements": 0
+  },
+  "final_recall@10": 0.98376,
+  "adapter": "real",
+  "cfg": {
+    "ticks": 100,
+    "R": 3,
+    "chunk_size": 4096,
+    "reload_threshold": 0.1,
+    "parity_on": false,
+    "bounds_sample": 16,
+    "ef": 2000,
+    "seed": 1234
+  }
+}

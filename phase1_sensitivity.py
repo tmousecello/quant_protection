@@ -320,9 +320,13 @@ def aggregate(all_records):
     return rows
 
 
-def write_vuln_map(out, rows):
+def write_vuln_map(out, rows, meta=None):
+    # `meta` (optional) carries provenance + the units legend (Phase 3 / Stage 1). When None the
+    # JSON is the historic {"rows": [...]} shape, so the phase1 callers are unaffected (and existing
+    # phase1/phase2 artifacts stay comparable). CSV stays rows-only — meta lives in the JSON.
+    payload = {"rows": rows} if meta is None else {"meta": meta, "rows": rows}
     with open(os.path.join(out, "vuln_map.json"), "w") as f:
-        json.dump({"rows": rows}, f, indent=2)
+        json.dump(payload, f, indent=2)
     import csv
     if rows:
         cols = list(rows[0].keys())

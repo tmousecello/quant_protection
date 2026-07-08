@@ -1,0 +1,61 @@
+{
+  "adapter": "real",
+  "results": [
+    {
+      "structure": "rotation",
+      "modes": {
+        "clustered": {
+          "n_trials": 40,
+          "budget_bits": 16,
+          "collapse_frac": 1.0,
+          "mean_dRecall@10": 0.8247,
+          "n_crash": 0
+        },
+        "uniform": {
+          "n_trials": 40,
+          "budget_bits": 16,
+          "collapse_frac": 1.0,
+          "mean_dRecall@10": 0.8137,
+          "n_crash": 0
+        },
+        "cross_row": {
+          "n_trials": 40,
+          "budget_bits": 2,
+          "collapse_frac": 0.0,
+          "mean_dRecall@10": 0.2778,
+          "n_crash": 0,
+          "note": "2-bit rowhammer victim pair; not budget-matched"
+        },
+        "clustered_more_dangerous": true
+      }
+    },
+    {
+      "structure": "bin_factors",
+      "modes": {
+        "clustered": {
+          "n_trials": 40,
+          "budget_bits": 16,
+          "collapse_frac": 0.0,
+          "mean_dRecall@10": 0.0,
+          "n_crash": 0
+        },
+        "uniform": {
+          "n_trials": 40,
+          "budget_bits": 16,
+          "collapse_frac": 0.0,
+          "mean_dRecall@10": 0.0,
+          "n_crash": 0
+        },
+        "cross_row": {
+          "n_trials": 40,
+          "budget_bits": 2,
+          "collapse_frac": 0.0,
+          "mean_dRecall@10": 0.0,
+          "n_crash": 0,
+          "note": "2-bit rowhammer victim pair; not budget-matched"
+        },
+        "clustered_more_dangerous": true
+      }
+    }
+  ]
+}

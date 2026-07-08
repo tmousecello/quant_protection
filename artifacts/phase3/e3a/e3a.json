@@ -1,0 +1,109 @@
+{
+  "adapter": "real",
+  "results": [
+    {
+      "structure": "rotation",
+      "p1_single_bit_collapse": 0.002,
+      "n_p1_samples": 512,
+      "n_trials": 40,
+      "tol": 0.15,
+      "curve": [
+        {
+          "k": 1,
+          "predicted": 0.002,
+          "measured": 0.0,
+          "abs_diff": 0.002,
+          "additive": true
+        },
+        {
+          "k": 2,
+          "predicted": 0.0039,
+          "measured": 0.0,
+          "abs_diff": 0.0039,
+          "additive": true
+        },
+        {
+          "k": 4,
+          "predicted": 0.0078,
+          "measured": 0.325,
+          "abs_diff": 0.3172,
+          "additive": false
+        },
+        {
+          "k": 8,
+          "predicted": 0.0155,
+          "measured": 1.0,
+          "abs_diff": 0.9845,
+          "additive": false
+        },
+        {
+          "k": 16,
+          "predicted": 0.0308,
+          "measured": 1.0,
+          "abs_diff": 0.9692,
+          "additive": false
+        },
+        {
+          "k": 32,
+          "predicted": 0.0606,
+          "measured": 1.0,
+          "abs_diff": 0.9394,
+          "additive": false
+        }
+      ],
+      "additivity_holds": false
+    },
+    {
+      "structure": "bin_factors",
+      "p1_single_bit_collapse": 0.0,
+      "n_p1_samples": 96,
+      "n_trials": 40,
+      "tol": 0.15,
+      "curve": [
+        {
+          "k": 1,
+          "predicted": 0.0,
+          "measured": 0.0,
+          "abs_diff": 0.0,
+          "additive": true
+        },
+        {
+          "k": 2,
+          "predicted": 0.0,
+          "measured": 0.0,
+          "abs_diff": 0.0,
+          "additive": true
+        },
+        {
+          "k": 4,
+          "predicted": 0.0,
+          "measured": 0.0,
+          "abs_diff": 0.0,
+          "additive": true
+        },
+        {
+          "k": 8,
+          "predicted": 0.0,
+          "measured": 0.0,
+          "abs_diff": 0.0,
+          "additive": true
+        },
+        {
+          "k": 16,
+          "predicted": 0.0,
+          "measured": 0.0,
+          "abs_diff": 0.0,
+          "additive": true
+        },
+        {
+          "k": 32,
+          "predicted": 0.0,
+          "measured": 0.0,
+          "abs_diff": 0.0,
+          "additive": true
+        }
+      ],
+      "additivity_holds": true
+    }
+  ]
+}

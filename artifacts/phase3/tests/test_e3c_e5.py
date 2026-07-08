@@ -27,7 +27,7 @@ from qp import config, metrics
 from qp.rabitq import stub_adapter as adapter
 from qp.rabitq import eb_policy, layout
 from phase3_e3c_temporal import TemporalCorruptor, PATTERNS, SMOKE_CFG, _resolve_region
-from phase3_e5_recovery import RecoveryGuard, SMOKE_CFG as E5_SMOKE_CFG
+from phase3_e5_recovery import RecoveryGuard, SMOKE_CFG as E5_SMOKE_CFG, replica_lane_seed
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +503,20 @@ class TestE5CliffSelfScrub:
         # anchor is inert without cliff_scrub even if anchor_every is set
         guard.cliff_anchor_if_due(buf, tick=10)
         assert guard._cliff_anchor_checked == 0
+
+    def test_replica_lane_seed_no_aliasing(self):
+        """SeedSequence lane: deterministic, and no collisions across (root, tick, r) —
+        including adjacent roots × ticks, the aliasing case the old XOR lane risked
+        (root^tick collides across the batch's neighbouring seeds)."""
+        assert replica_lane_seed(1234, 7, 2) == replica_lane_seed(1234, 7, 2)
+        seen = {}
+        for root in range(1000, 1030):
+            for tick in range(150):
+                for r in range(3):
+                    s = replica_lane_seed(root, tick, r)
+                    assert s not in seen, (
+                        f"lane seed collision: {(root, tick, r)} vs {seen[s]}")
+                    seen[s] = (root, tick, r)
 
     def test_read_serialized_range_semantics(self):
         """Adapter clean-source reads match the serialized bytes and are independent copies."""

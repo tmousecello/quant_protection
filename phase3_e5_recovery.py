@@ -58,6 +58,19 @@ SMOKE_CFG = {
 FULL_CFG = {**SMOKE_CFG, "ticks": 100}
 
 
+def replica_lane_seed(root_seed, tick, r):
+    """Per-(root, tick, replica) injection seed via SeedSequence entropy-list derivation.
+
+    Replaces the old `root ^ tick ^ ((r+1)*0x5EED)` XOR lane (§8 limitation 2: expb caught
+    aliasing on a similar XOR lane). Stateless and deterministic; well-mixed across adjacent
+    roots/ticks/replicas. The main-buf lane (`root ^ tick`) is deliberately left unchanged so
+    the main-figure damage trajectory stays comparable across runs 2/3/4/scrub — vote failure
+    depends only on the replica lanes (only copies vote).
+    """
+    return int(np.random.SeedSequence([int(root_seed), int(tick), int(r) + 1])
+               .generate_state(1)[0])
+
+
 class RecoveryGuard:
     """Two-layer + bounds-check recovery guard for a RaBitQ index buffer.
 
@@ -605,8 +618,13 @@ def run(args):
                 if inject_replicas:
                     for r, (rc, copy) in enumerate(zip(rep_corruptors,
                                                        guard.rotation_replicas())):
-                        # independent stream per replica: same process, different seed lane
-                        rc.inject_step(copy, args.pattern, seed ^ ((r + 1) * 0x5EED))
+                        # independent stream per replica via SeedSequence (stage-3 §8-limit-2
+                        # migration: the old `seed ^ ((r+1)*0x5EED)` XOR lane is aliasing-prone;
+                        # expb caught collisions on a similar lane). Entropy-list derivation is
+                        # stateless and deterministic per (root, tick, replica). NOTE: root
+                        # seed 1234 --inject-replicas results legitimately differ from run 4.
+                        rc.inject_step(copy, args.pattern,
+                                       replica_lane_seed(cfg["seed"], tick, r))
 
                 # Low-frequency anchor backstop BEFORE the search, so this tick's row
                 # counters already reflect an anchor-triggered reload.

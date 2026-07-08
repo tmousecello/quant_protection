@@ -258,6 +258,9 @@ EB 的增量是薄利;偵測本身才是厚利。
 2. run 4 的複本 seed lane 沿用 `seed ^ tick ^ ((r+1)·0x5EED)`;expb 曾在類似 XOR lane
    上抓到 aliasing(已改 SeedSequence)。此處檢查過 tick/replica 視窗內無碰撞,
    但多 seed 重跑時建議一併遷移到 SeedSequence。
+   **(stage 3 已遷移)**:複本 lane 改為 `SeedSequence([root, tick, r+1])`
+   (`phase3_e5_recovery.replica_lane_seed`),主 buf lane 不變;root 1234 的
+   `--inject-replicas` 結果自此與 run 4 合法不同(lane 語意變更,非回歸)。
 3. `--measure-recall` 每 tick 一次完整查詢(~15 s),100 ticks ≈ 27 分鐘;
    多 pattern × 多 seed 的矩陣建議 tmux 分批。
 4. 副本 scrub(§5 設計含義 (a))是下一個最便宜、最有回報的機制實驗:

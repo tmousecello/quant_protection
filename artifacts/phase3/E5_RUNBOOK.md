@@ -108,6 +108,35 @@ Compare tick-of-collapse (recall < 0.80) with and without E5.
 
 ---
 
+## Stage 3 — self-scrub, seed batch, validation (formal runs via run_stage3_x86.sh)
+
+All stage-3 formal experiments are launched ONLY through `bash run_stage3_x86.sh [A|B|C|D]`
+(implementation is validated with pytest + `--smoke`, artifacts under `artifacts_smoke/`):
+
+```bash
+# Phase A — main figure 4th line: vote-failure-triggered self-scrub, 200 ticks (~52 min)
+python phase3_e5_recovery.py --adapter real --region rotation --pattern uniform_accum \
+    --inject-replicas --cliff-scrub --ticks 200
+# → e5_uniform_accum_rotation_replicas_scrub.* (the _scrub suffix protects run 4's files)
+# expect: recall flat 0.98376, cliff_reload_triggered > 0, cliff_irrecoverable == 0
+
+# Phase B — 30-seed fuse first-failure distribution (legacy fuse semantics, recall off)
+python phase3_e5_seed_batch.py --launch --analyze --determinism   # then --timelines
+# → artifacts/phase3/e5_seeds/first_fail_summary.json + min/max full timelines
+
+# Phase C — F validation sweep + synthesis + |Δ|<=0.01 gates (see phase3_f_synth.py)
+# Phase D — G detection analysis (offline)
+```
+
+New flags on `phase3_e5_recovery.py`: `--cliff-scrub` (vote failure → full reload of
+buf + all replicas from the persistent clean source, `_scrub` filename suffix),
+`--anchor-every N` (low-frequency backstop, default 10, 0=off), `--no-recall`
+(counters only, seconds/run), `--out-tag` / `--out-dir` (batch sharding).
+Replica lanes now derive from `SeedSequence([root, tick, r+1])` — root-1234 results
+legitimately differ from run 4.
+
+---
+
 ## Full Run — Experiment B (ex slope + EB recall curve)
 
 ```bash

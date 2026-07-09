@@ -90,6 +90,22 @@ def align_timelines(series):
     return aligned
 
 
+def _recall_or_stop(row):
+    """recall@10 as float, or REPORT-AND-STOP if it is None (a crashed/timed-out expb row).
+
+    Silently skipping a crash row would corrupt the 4-pattern mean; per project policy the
+    caller must fix the crash and re-run, not average around it.
+    """
+    r = row.get("recall@10")
+    if r is None:
+        raise RuntimeError(
+            f"REPORT-AND-STOP: crash/timeout row (recall@10=None) in "
+            f"pattern={row.get('pattern')} f={row.get('fraction')} "
+            f"recovery={row.get('recovery')} — cannot enter the tolerance curve; "
+            f"fix the failing sweep cell and re-run, do not average around it.")
+    return float(r)
+
+
 def tolerance_curves(records_rows, clean_recall):
     """expb rows -> {recovery: [(f, mean recall across patterns)]}, clean anchor prepended.
 
@@ -98,7 +114,7 @@ def tolerance_curves(records_rows, clean_recall):
     acc = {}
     for row in records_rows:
         key = (row["recovery"], float(row["fraction"]))
-        acc.setdefault(key, []).append(float(row["recall@10"]))
+        acc.setdefault(key, []).append(_recall_or_stop(row))
     curves = {}
     for (mode, f), vals in acc.items():
         curves.setdefault(mode, []).append((f, sum(vals) / len(vals)))
@@ -117,15 +133,17 @@ def interp_recall(curve, f):
 
 
 def solve_fstar(curve, r_min):
-    """Largest f with recall(f) >= r_min, by linear interpolation on the first crossing.
+    """Largest f with recall(f) >= r_min, by linear interpolation on the LAST downward
+    crossing of r_min.
 
-    Returns None if the curve never drops below r_min (f* beyond measured range) or
-    starts below it already.
+    Scanning from the right (not the first crossing) means a non-monotonic 4-pattern-averaged
+    curve that dips below r_min and recovers is not truncated early — f* is the largest f at
+    which recall is still >= r_min. Returns None if the curve never drops below r_min (f*
+    beyond measured range) or starts below it already. y0 >= r_min > y1 implies y0 > y1, so
+    the interpolation denominator is always positive.
     """
-    for (f0, y0), (f1, y1) in zip(curve, curve[1:]):
+    for (f0, y0), (f1, y1) in reversed(list(zip(curve, curve[1:]))):
         if y0 >= r_min > y1:
-            if y0 == y1:
-                return f0
             return f0 + (y0 - r_min) * (f1 - f0) / (y0 - y1)
     return None
 
@@ -153,7 +171,7 @@ def average_measured_at_fraction(rows, fraction, tol=1e-9):
     acc = {}
     for row in rows:
         if abs(float(row["fraction"]) - fraction) <= tol:
-            acc.setdefault(row["recovery"], []).append(float(row["recall@10"]))
+            acc.setdefault(row["recovery"], []).append(_recall_or_stop(row))
     return {mode: sum(v) / len(v) for mode, v in acc.items()}
 
 
@@ -177,10 +195,16 @@ def run_check_gates(measured, predictions, cliff, tol=CHECK_TOL):
                   "delta": d_drop, "requires": "drop < eb and drop < 0.90", "ok": ok_b})
 
     det = cliff["deterministic_6bit"]
+    # --check runs only in the formal pipeline (real adapter, run-2 records present), so the
+    # run-2 tick-0 reproduction delta MUST be present and within tol — a None delta means the
+    # deterministic reproduction was never verified and the gate must fail, not pass vacuously.
     ok_c = bool(det["collapse"]
-                and (det.get("delta") is None or det["delta"] <= tol)
+                and det.get("delta") is not None and det["delta"] <= tol
                 and cliff["k8"]["collapse"])
-    gates.append({"gate": "c_cliff", "deterministic": det, "k8": cliff["k8"], "ok": ok_c})
+    reason_c = ("run-2 reference missing — deterministic reproduction not verified"
+                if det.get("delta") is None else "6-bit reproduces run-2 tick-0 within tol")
+    gates.append({"gate": "c_cliff", "deterministic": det, "k8": cliff["k8"],
+                  "requires": reason_c, "ok": ok_c})
 
     return all(g["ok"] for g in gates), gates
 
@@ -299,8 +323,13 @@ def synthesize(args):
           f"pred EB={predictions['pred_eb_at_headline']:.4f} "
           f"drop={predictions['pred_drop_at_headline']:.4f}")
     for r in table:
-        print(f"  R_min={r['r_min']:.2f}  f*_drop={r['fstar_drop']:.3f} "
-              f"f*_EB={r['fstar_eb']:.3f}  ratio={r['interval_ratio']:.2f}")
+        # solve_fstar returns None when f* lies beyond the measured range — print n/a,
+        # the frontier row is still valid data (same convention as the CSV's empty cell).
+        fd, fe, ratio = (("n/a" if v is None else f"{v:{spec}}")
+                         for v, spec in ((r["fstar_drop"], ".3f"),
+                                         (r["fstar_eb"], ".3f"),
+                                         (r["interval_ratio"], ".2f")))
+        print(f"  R_min={r['r_min']:.2f}  f*_drop={fd} f*_EB={fe}  ratio={ratio}")
     return summary
 
 
@@ -385,7 +414,8 @@ def run_cliff_check(args):
         recall_k8 = _recall_of(buf8)
         k8 = {"recall": recall_k8, "collapse": bool(recall_k8 < 0.5 * clean_recall)}
     finally:
-        for p in (tmp, tmp + ".ids.ivecs"):
+        # glob tmp* to also sweep search sidecars (.ids.ivecs + .dist.fvecs / .stats.json).
+        for p in glob.glob(tmp + "*"):
             if os.path.exists(p):
                 os.unlink(p)
 
@@ -433,6 +463,13 @@ def check(args):
         with open(p) as fh:
             rows.extend(json.loads(l) for l in fh if l.strip())
     measured = average_measured_at_fraction(rows, predictions["headline_fraction"])
+    if not measured:
+        found = sorted({round(float(r["fraction"]), 4) for r in rows})
+        raise RuntimeError(
+            f"REPORT-AND-STOP: no fstar_check rows at f={predictions['headline_fraction']} "
+            f"(sweep measured fractions {found}). The validation sweep ran at a different "
+            f"fraction than the synthesized headline f*_EB — re-run `run_stage3_x86.sh C`, "
+            f"which derives --fractions from the synthesize output.")
 
     all_ok, gates = run_check_gates(measured, predictions, cliff)
     per_pattern = {}
@@ -453,8 +490,9 @@ def check(args):
                            default=str)[:200])
     if not all_ok:
         print("[f-synth] REPORT-AND-STOP: a validation point deviates beyond "
-              f"{CHECK_TOL}; prime suspect is the linear interpolation between measured "
-              "fractions — do NOT hand-adjust artifacts.")
+              f"{CHECK_TOL} (measured EB/drop vs the interpolated predictions, or the cliff "
+              "reproduction) — investigate the interpolation between measured fractions; "
+              "do NOT hand-adjust artifacts.")
         sys.exit(1)
     print(f"[f-synth] all 3 validation gates PASS -> {out_path}")
     return result

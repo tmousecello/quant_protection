@@ -105,6 +105,19 @@ def analytic_estimate(p=0.005, bits=512, R=3):
     }
 
 
+def timeline_ticks(first_fail, base, post_fail=50):
+    """Ticks a supplemental recall timeline needs to actually show its collapse.
+
+    The fuse first-failure is measured over FULL_TICKS (150), so a picked seed's first
+    failure can land beyond `base` (100). Running the timeline for only `base` ticks would
+    stop before that seed collapses. Extend to first_fail + post_fail so the post-failure
+    unprotected trajectory is visible. (first_fail is None-safe: a censored pick keeps base.)
+    """
+    if first_fail is None:
+        return int(base)
+    return int(max(base, first_fail + post_fail))
+
+
 def records_identical(path_a, path_b):
     """Byte-compare two records files (rows carry no timestamps -> must be identical)."""
     with open(path_a, "rb") as fa, open(path_b, "rb") as fb:
@@ -233,10 +246,14 @@ def run_timelines(out_dir, adapter, jobs=2, ticks=100):
     earliest = min(observed, key=lambda s: (observed[s], s))
     latest = max(observed, key=lambda s: (observed[s], -s))
     picks = [earliest] if earliest == latest else [earliest, latest]
+    # Each timeline runs long enough to show ITS seed's collapse: base, or the seed's
+    # first-fail tick (measured over FULL_TICKS) + a post-failure margin, whichever is more.
+    pick_ticks = {s: timeline_ticks(observed[s], base=ticks) for s in picks}
     print(f"[seed-batch] full-recall timelines for seeds {picks} "
-          f"(first-fail ticks {[observed[s] for s in picks]})")
+          f"(first-fail ticks {[observed[s] for s in picks]}, "
+          f"timeline ticks {[pick_ticks[s] for s in picks]})")
     with ThreadPoolExecutor(max_workers=jobs) as pool:
-        futs = [pool.submit(_run_one, s, ticks, out_dir, f"seed{s}full", adapter,
+        futs = [pool.submit(_run_one, s, pick_ticks[s], out_dir, f"seed{s}full", adapter,
                             False)  # no_recall=False: these ARE the recall timelines
                 for s in picks]
         for f in futs:

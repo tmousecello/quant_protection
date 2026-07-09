@@ -30,6 +30,7 @@ Layer behaviour:
 """
 
 import argparse
+import glob
 import json
 import os
 import tempfile
@@ -66,9 +67,14 @@ def replica_lane_seed(root_seed, tick, r):
     roots/ticks/replicas. The main-buf lane (`root ^ tick`) is deliberately left unchanged so
     the main-figure damage trajectory stays comparable across runs 2/3/4/scrub — vote failure
     depends only on the replica lanes (only copies vote).
+
+    Returns a 64-bit word: over the formal grid (30 roots x 150 ticks x 3 replicas = 13,500
+    lanes) a 32-bit output would carry a ~2% birthday-collision risk (a collision = two
+    replica streams sharing a seed = exactly the aliasing we are removing); 64-bit drops that
+    to ~5e-12. np.random.default_rng accepts a 64-bit seed.
     """
     return int(np.random.SeedSequence([int(root_seed), int(tick), int(r) + 1])
-               .generate_state(1)[0])
+               .generate_state(1, dtype=np.uint64)[0])
 
 
 class RecoveryGuard:
@@ -95,6 +101,7 @@ class RecoveryGuard:
         self._cliff_repaired = 0
         self._cliff_irrecoverable = 0
         self._cliff_reload_triggered = 0
+        self._cliff_vote_fail_reloads = 0
         self._cliff_anchor_checked = 0
         self._cliff_anchor_mismatch = 0
         if cfg.get("cliff_scrub", False) and not hasattr(adapter, "read_serialized_range"):
@@ -226,6 +233,7 @@ class RecoveryGuard:
             "cliff_repaired": self._cliff_repaired,
             "cliff_irrecoverable": self._cliff_irrecoverable,
             "cliff_reload_triggered": self._cliff_reload_triggered,
+            "cliff_vote_fail_reloads": self._cliff_vote_fail_reloads,
             "cliff_anchor_checked": self._cliff_anchor_checked,
             "cliff_anchor_mismatch": self._cliff_anchor_mismatch,
             "slope_checked": self._slope_checked,
@@ -276,6 +284,7 @@ class RecoveryGuard:
                 # immediately: the computed majority/repaired_bits are stale and wrong.
                 _log(f"[e5] cliff vote failure (≥{(R+1)//2} copies corrupted same way) "
                      f"→ full reload from clean source")
+                self._cliff_vote_fail_reloads += 1
                 self._reload_cliff(buf)
                 return
             self._cliff_irrecoverable += 1
@@ -626,10 +635,6 @@ def run(args):
                         rc.inject_step(copy, args.pattern,
                                        replica_lane_seed(cfg["seed"], tick, r))
 
-                # Low-frequency anchor backstop BEFORE the search, so this tick's row
-                # counters already reflect an anchor-triggered reload.
-                guard.cliff_anchor_if_due(buf, tick)
-
                 if no_recall:
                     guard.scrub_only(buf)
                     res, recall = {}, None
@@ -638,6 +643,14 @@ def run(args):
                     ids = res.get("ids")
                     recall = (float(metrics.recall_at_k(ids, gt, config.K))
                               if ids is not None else None)
+
+                # Low-frequency anchor backstop AFTER the per-query scrub: the scrub has
+                # already repaired buf's rotation to the majority, so an anchor mismatch now
+                # means the majority was SILENTLY wrong (CRC collision / corrupted in-memory
+                # CRC anchor) — the real §1.2 blind spot — not this tick's ordinary,
+                # already-repaired damage. It heals buf for the next tick; this tick's row
+                # counters reflect the anchor action.
+                guard.cliff_anchor_if_due(buf, tick)
 
                 ctr = guard.counters()
                 row = {"tick": tick, "cumulative_corruption": cc,
@@ -659,8 +672,11 @@ def run(args):
                           f"cliff_reload={ctr['cliff_reload_triggered']}  "
                           f"slope_failed={ctr['slope_failed']}")
     finally:
-        for p in (tmp_path, tmp_path + ".clean.ivecs", tmp_path + ".ids.ivecs",
-                  tmp_path + ".eb.ivecs"):
+        # glob tmp_path* to also sweep the search sidecars (.clean/.ids/.eb .ivecs plus their
+        # .dist.fvecs / .stats.json companions the workstation build emits). The
+        # NamedTemporaryFile stem is unique per process, so the glob is safe under the
+        # parallel seed batch.
+        for p in glob.glob(tmp_path + "*"):
             if os.path.exists(p):
                 os.unlink(p)
 

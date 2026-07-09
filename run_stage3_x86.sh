@@ -6,8 +6,9 @@
 #
 #   A  self-scrub 200-tick timeline (main figure 4th line)            ~52 min
 #      e5 --inject-replicas --cliff-scrub --ticks 200 + sanity gate
-#   B  30-seed fuse first-failure distribution                        ~15 min + 2x27 min
+#   B  30-seed fuse first-failure distribution                        ~15 min + 2x(≤53 min)
 #      seed batch launch -> analyze -> determinism gate -> min/max timelines
+#      (each timeline runs max(100, first_fail+50) ticks so the latest seed's collapse shows)
 #   C  F validation + synthesis                                       ~20 min
 #      expb fstar_check sweep (4 patterns x f=0.101 x {eb,drop}) ->
 #      f_synth --run-cliff-check -> --synthesize -> --check (|Δ|<=0.01 gate, exit!=0 stops)
@@ -64,14 +65,20 @@ phase_A() {
       --pattern uniform_accum --inject-replicas --cliff-scrub --ticks 200
   sanity A "
 import json
-rows = [json.loads(l) for l in open('$QP_ROOT/artifacts/phase3/e5/e5_uniform_accum_rotation_replicas_scrub.records.jsonl')]
+base = '$QP_ROOT/artifacts/phase3/e5/e5_uniform_accum_rotation_replicas_scrub'
+rows = [json.loads(l) for l in open(base + '.records.jsonl')]
+clean = json.load(open(base + '.json'))['clean_recall@10']
 assert len(rows) == 200, f'expected 200 ticks, got {len(rows)}'
 recalls = [r['recall@10'] for r in rows]
 final = rows[-1]['counters']
-assert all(abs(x - 0.98376) < 1e-9 for x in recalls), f'recall not flat: min={min(recalls)}'
-assert final['cliff_reload_triggered'] > 0, 'no vote failure occurred in 200 ticks (implausible; check lanes)'
+assert all(r is not None for r in recalls), 'a tick returned no ids (crash) — recall is None'
+assert all(abs(x - recalls[0]) < 1e-9 for x in recalls), f'recall not flat: min={min(recalls)} max={max(recalls)}'
+assert abs(recalls[0] - clean) < 1e-9, f'held recall {recalls[0]} != clean baseline {clean}'
+assert final['cliff_vote_fail_reloads'] > 0, 'no vote failure was rescued in 200 ticks (implausible; check lanes)'
 assert final['cliff_irrecoverable'] == 0, f'irrecoverable={final[\"cliff_irrecoverable\"]}'
-print(f'[sanity A] OK: recall flat 0.98376 x200, reloads={final[\"cliff_reload_triggered\"]}, '
+print(f'[sanity A] OK: recall flat at clean {recalls[0]:.5f} x200, '
+      f'vote_fail_reloads={final[\"cliff_vote_fail_reloads\"]}, '
+      f'total_reloads={final[\"cliff_reload_triggered\"]}, '
       f'anchor_checked={final[\"cliff_anchor_checked\"]}, anchor_mismatch={final[\"cliff_anchor_mismatch\"]}')
 "
 }
@@ -93,15 +100,26 @@ print(f'[sanity B] OK: {st[\"n_observed\"]}/30 observed, median={st[\"median\"]}
 }
 
 phase_C() {
-  echo "=== Phase C: F validation sweep + synthesis + gates (~20 min) ==="
-  # (a)+(b): 4 patterns x f=0.101 x {fallback_eb, drop}, LIGHT severity (default flips=4)
+  echo "=== Phase C: F synthesis + validation sweep + gates (~20 min) ==="
+  local F_SYNTH_DIR="$QP_ROOT/artifacts/phase3/f_synth"
+  # Synthesis FIRST (needs Phase A's scrub timeline + the light expb records; independent of
+  # the fstar_check sweep). It emits predictions.headline_fraction = round(f*_EB, 3).
+  run C "$PY" "$QP_ROOT/phase3_f_synth.py" --synthesize --adapter real
+  # Derive the sweep fraction from the synthesized headline f*_EB — never hardcode it, or a
+  # curve shift would silently make --check find zero matching rows.
+  if [ "$DRY" -eq 1 ]; then
+    F="<headline_fraction>"
+  else
+    F="$("$PY" -c "import json; print(json.load(open('$F_SYNTH_DIR/tolerance_fstar.json'))['predictions']['headline_fraction'])")"
+  fi
+  echo "+ [phase C] validation sweep fraction (synthesized headline f*_EB) = $F"
+  # (a)+(b): 4 patterns x f=$F x {fallback_eb, drop}, LIGHT severity (default flips=4)
   run C "$PY" "$QP_ROOT/phase3_expb_recovery.py" --sweep --adapter real \
       --patterns uniform_accum,clustered_accum,cross_row_accum,burst_accum \
-      --fractions 0.101 --recovery fallback_eb,drop --out-tag fstar_check
+      --fractions "$F" --recovery fallback_eb,drop --out-tag fstar_check
   # (c): deterministic run-2 tick-0 reproduction + k=8 secondary
   run C "$PY" "$QP_ROOT/phase3_f_synth.py" --run-cliff-check --adapter real
-  # synthesis (needs Phase A's scrub timeline) + the |Δ|<=0.01 gates
-  run C "$PY" "$QP_ROOT/phase3_f_synth.py" --synthesize --adapter real
+  # the |Δ|<=0.01 gates (exit!=0 stops)
   run C "$PY" "$QP_ROOT/phase3_f_synth.py" --check
 }
 

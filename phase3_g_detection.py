@@ -5,11 +5,12 @@ compares, per (pattern, f, severity, recovery):
 
   primary   observed_load  = stats.load.elements_crc_fail / stats.load.elements_checked
             vs the injected truth (fraction_actual). The load-time CRC scan checks every
-            element, so this ratio equals the truth EXACTLY BY CONSTRUCTION (the in-run
-            assertion _check_crc_fail_count already enforced crc_fail == n_elements).
-            That exactness IS the §3.3 claim — the detector's output is directly the
-            decision variable f̂ the scrub/EB policy consumes; report it honestly as
-            such, not as a noisy estimate.
+            element, so this ratio equals the truth EXACTLY BY CONSTRUCTION: the numerator
+            is pinned by the in-run assertion _check_crc_fail_count (crc_fail == n_elements)
+            and the denominator by extract_points' own check that elements_checked ==
+            cur_element_count. The §3.3 claim is thus about the CONSTRUCTION itself — the
+            detector's output is directly the decision variable f̂ the scrub/EB policy
+            consumes — not a rediscovery of detector accuracy; report it honestly as such.
 
   secondary observed_access = stats.totals.corrupt_hits / stats.totals.consults — the
             access-weighted view during search (what fraction of consulted vectors was
@@ -51,6 +52,22 @@ def extract_points(rows, severity):
         if row.get("recovery") not in DETECTING_MODES or checked <= 0:
             excluded += 1
             continue
+        truth = float(row["fraction_actual"])
+        # 'observed_load == truth by construction' holds ONLY if the load scan checked every
+        # element (elements_checked == cur_element_count). expb asserts the numerator
+        # (elements_crc_fail == n_elements) but NOT this denominator; verify it here from
+        # n_elements = cur_element_count * fraction_actual. A drifting denominator would make
+        # the diagonal claim false, so stop rather than plot a misleading point.
+        n_elements = row.get("n_elements")
+        if n_elements is not None and truth > 0:
+            implied_total = checked * truth   # == n_elements iff checked == cur_element_count
+            if abs(implied_total - float(n_elements)) >= 0.5:
+                raise RuntimeError(
+                    f"REPORT-AND-STOP: elements_checked ({checked}) != cur_element_count for "
+                    f"pattern={row['pattern']} f={row['fraction']} recovery={row['recovery']} "
+                    f"(implied total {implied_total:.2f} vs n_elements {n_elements}); the load "
+                    f"scan did not check every element, so observed_load would NOT equal the "
+                    f"injected truth by construction.")
         totals = stats.get("totals") or {}
         consults = int(totals.get("consults", 0))
         points.append({
@@ -124,10 +141,13 @@ def run(args):
     md_path = os.path.join(args.out_dir, "detection_table.md")
     with open(md_path, "w") as fh:
         fh.write("# G — on-access detection vs injected truth\n\n"
-                 "observed_load = elements_crc_fail/elements_checked (load-time CRC scan; "
-                 "equals truth by construction — this exactness is the §3.3 claim: the "
-                 "detector directly emits the decision variable). observed_access = "
-                 "corrupt_hits/consults (access-weighted, informational).\n\n")
+                 "observed_load = elements_crc_fail/elements_checked (load-time CRC scan). It "
+                 "equals truth by construction — numerator pinned by the in-run assertion "
+                 "crc_fail==n_elements, denominator verified here as elements_checked=="
+                 "cur_element_count. The §3.3 evidence is that construction (detection "
+                 "directly emits the decision variable), not a rediscovery of accuracy. "
+                 "observed_access = corrupt_hits/consults (access-weighted, informational)."
+                 "\n\n")
         fh.write("| " + " | ".join(cols) + " |\n")
         fh.write("|" + "---|" * len(cols) + "\n")
         for p in all_points:
@@ -145,10 +165,12 @@ def run(args):
         "severities_found": {sev: len(ps) for sev, ps in files.items()},
         "source_files": files,
         "outputs": {"csv": csv_path, "md": md_path, "figure": fig_path},
-        "note": ("load-scan ratio equals injected truth by construction (every element "
-                 "CRC-checked at load; in-run assertion enforced equality) — evidence for "
-                 "§3.3 'detection directly emits the decision variable'. The access-weighted "
-                 "ratio differs from f because query traffic is non-uniform."),
+        "note": ("load-scan ratio equals injected truth by construction: numerator pinned by "
+                 "the in-run crc_fail==n_elements assertion, denominator verified as "
+                 "elements_checked==cur_element_count (extract_points stops otherwise) — "
+                 "evidence for §3.3 'detection directly emits the decision variable', not a "
+                 "rediscovery of accuracy. The access-weighted ratio differs from f because "
+                 "query traffic is non-uniform."),
     }
     sum_path = os.path.join(args.out_dir, "g_detection_summary.json")
     with open(sum_path, "w") as fh:

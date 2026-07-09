@@ -132,7 +132,8 @@ New flags on `phase3_e5_recovery.py`: `--cliff-scrub` (vote failure → full rel
 buf + all replicas from the persistent clean source, `_scrub` filename suffix),
 `--anchor-every N` (low-frequency backstop, default 10, 0=off), `--no-recall`
 (counters only, seconds/run), `--out-tag` / `--out-dir` (batch sharding).
-Replica lanes now derive from `SeedSequence([root, tick, r+1])` — root-1234 results
+Replica lanes now derive from `SeedSequence([root, tick, r+1])` (64-bit word, so the
+13,500-lane formal grid has ~5e-12 collision risk vs ~2% at 32-bit) — root-1234 results
 legitimately differ from run 4.
 
 ---
@@ -190,9 +191,10 @@ is the human decision recorded in `artifacts/phase3/plan/stage2_plan1.md` when E
 | `cliff_checked` | rotation bits checked (64B × 8 per search call) |
 | `cliff_repaired` | bits corrected across copies + buf by majority-vote |
 | `cliff_irrecoverable` | searches where majority-vote result failed clean CRC and was NOT recovered (with `--cliff-scrub` a vote failure triggers a reload instead and does not count here) |
-| `cliff_reload_triggered` | full reloads of buf + all replicas from the persistent clean source (vote-failure trigger or anchor mismatch; stage-3 `--cliff-scrub`) |
+| `cliff_reload_triggered` | TOTAL full reloads of buf + all replicas from the persistent clean source = `cliff_vote_fail_reloads` + anchor-mismatch reloads (stage-3 `--cliff-scrub`) |
+| `cliff_vote_fail_reloads` | reloads caused specifically by a majority-vote failure being rescued (the "fuse fired and was saved" event; the load-bearing evidence for task #1). `> 0` proves a vote failure actually occurred and was recovered |
 | `cliff_anchor_checked` | low-frequency anchor checks performed (buf rotation vs clean source, every `anchor_every` ticks) |
-| `cliff_anchor_mismatch` | anchor checks that found buf ≠ clean source (silent wrong majority caught) |
+| `cliff_anchor_mismatch` | anchor checks that found buf ≠ clean source AFTER the per-query scrub already ran — i.e. a genuinely silent wrong majority (CRC collision / corrupted in-memory CRC anchor), the §1.2 blind spot. Expected ~0 in a healthy run |
 | `slope_checked` | ex_code chunks CRC-checked |
 | `slope_failed` | chunks that failed CRC this run |
 | `slope_reloaded` | chunks batch-reloaded (lazy scrub) |

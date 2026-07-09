@@ -405,6 +405,8 @@ class TestE5CliffSelfScrub:
         self.guard._scrub_cliff(buf)
 
         assert self.guard._cliff_reload_triggered == 1
+        assert self.guard._cliff_vote_fail_reloads == 1, \
+            "the reload was caused by a vote failure, not an anchor check"
         assert self.guard._cliff_irrecoverable == 0, \
             "recovered event must not count as irrecoverable"
         assert np.array_equal(buf[self.bs:self.bs + self.bl], self._clean_rot())
@@ -417,7 +419,33 @@ class TestE5CliffSelfScrub:
         self.guard._scrub_cliff(buf)
         assert self.guard._cliff_irrecoverable == 0
         assert self.guard._cliff_reload_triggered == 1, "normal repair must not re-trigger reload"
+        assert self.guard._cliff_vote_fail_reloads == 1
         assert np.array_equal(self.guard._rot_copies[0], self._clean_rot())
+
+    def test_reload_reads_persistent_source_not_dram_snapshot(self):
+        """Spec §1.3: the clean source must live in persistent storage, never a cached DRAM
+        replica. Poison the guard's in-memory clean snapshot (self._clean_buf, kept for OOB
+        restore); a vote-failure reload must still restore the untouched PERSISTENT bytes,
+        proving _reload_cliff did not read the DRAM cache. Guards the plan's explicit Don't
+        (不把 clean rotation 快取成第四複本): a regression sourcing the reload from
+        self._clean_buf would flip this test red."""
+        buf = self.clean_buf.copy()
+        persistent_clean = np.asarray(adapter.serialize_index()[self.bs:self.bs + self.bl],
+                                      dtype=np.uint8)
+        # Poison the in-memory snapshot at a position UNRELATED to the vote hit.
+        self.guard._clean_buf[self.bs + 20] ^= 0b00001000
+        assert self.guard._clean_buf[self.bs + 20] != persistent_clean[20]
+        # Vote failure: 2 of 3 copies flip the same bit.
+        self.guard._rot_copies[0][0] ^= 0b00000001
+        self.guard._rot_copies[1][0] ^= 0b00000001
+
+        self.guard._scrub_cliff(buf)
+
+        assert self.guard._cliff_vote_fail_reloads == 1
+        assert np.array_equal(buf[self.bs:self.bs + self.bl], persistent_clean), \
+            "reload must restore persistent-clean bytes, not the poisoned DRAM snapshot"
+        assert buf[self.bs + 20] == persistent_clean[20], \
+            "the poisoned snapshot byte must NOT have leaked into the reload"
 
     def test_full_reload_clears_unrelated_damage(self):
         """Full-region semantics: accumulated damage at OTHER positions is also cleared."""
@@ -467,9 +495,30 @@ class TestE5CliffSelfScrub:
         assert self.guard._cliff_anchor_checked == 1
         assert self.guard._cliff_anchor_mismatch == 1
         assert self.guard._cliff_reload_triggered == 1
+        assert self.guard._cliff_vote_fail_reloads == 0, \
+            "the reload came from the anchor, not a vote failure"
         assert np.array_equal(buf[self.bs:self.bs + self.bl], self._clean_rot())
         assert self.guard._rot_clean_crc == zlib.crc32(bytes(self._clean_rot())), \
             "reload must self-heal the poisoned in-memory CRC anchor"
+
+    def test_anchor_no_false_trigger_on_repaired_buf(self):
+        """Real loop order (inject -> scrub -> anchor): after the per-query scrub repairs
+        the main buf, the anchor must NOT mismatch on this tick's ordinary damage. This is
+        the regression for the anchor-before-scrub ordering bug: run at every anchor tick
+        the anchor once fired on fresh, about-to-be-repaired damage ~92% of the time."""
+        buf = self.clean_buf.copy()
+        # This tick's fresh main-lane damage on buf; replicas stay clean (majority = clean).
+        buf[self.bs + 2] ^= 0b00000101
+        buf[self.bs + 11] ^= 0b01000000
+
+        self.guard._scrub_cliff(buf)                       # per-query scrub repairs buf
+        assert np.array_equal(buf[self.bs:self.bs + self.bl], self._clean_rot())
+
+        self.guard.cliff_anchor_if_due(buf, tick=5)        # anchor_every=5 -> due
+        assert self.guard._cliff_anchor_checked == 1
+        assert self.guard._cliff_anchor_mismatch == 0, \
+            "anchor must not fire on damage the per-query scrub already repaired"
+        assert self.guard._cliff_reload_triggered == 0
 
     def test_anchor_switch_off_leaves_silent_error(self):
         """anchor_every=0 → the silent wrong vote is NOT caught (the switch controls it)."""
@@ -776,7 +825,8 @@ class TestMiniTimeline:
 
         REQUIRED_COUNTER_KEYS = {
             "cliff_checked", "cliff_repaired", "cliff_irrecoverable",
-            "cliff_reload_triggered", "cliff_anchor_checked", "cliff_anchor_mismatch",
+            "cliff_reload_triggered", "cliff_vote_fail_reloads",
+            "cliff_anchor_checked", "cliff_anchor_mismatch",
             "slope_checked", "slope_failed", "slope_reloaded",
             "known_corrupted", "eb_fraction", "oob_elements",
         }

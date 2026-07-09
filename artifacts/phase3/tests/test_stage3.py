@@ -15,7 +15,7 @@ if _ROOT not in sys.path:
 
 from phase3_e5_seed_batch import (first_fail_tick, summarize_first_fails,
                                   analytic_estimate, records_identical,
-                                  batch_record_files, STEM_RE)
+                                  batch_record_files, STEM_RE, timeline_ticks)
 from phase3_f_synth import (align_timelines, tolerance_curves, interp_recall,
                             solve_fstar, interval_ratio, fstar_table,
                             average_measured_at_fraction, run_check_gates,
@@ -64,6 +64,19 @@ class TestSummarize:
         assert "median" not in s
 
 
+class TestTimelineTicks:
+    def test_extends_past_late_first_fail(self):
+        # a seed failing at tick 118 (measured over 150) needs > 100 ticks to show collapse
+        assert timeline_ticks(118, base=100) == 168
+        assert timeline_ticks(118, base=100, post_fail=30) == 148
+
+    def test_keeps_base_for_early_fail(self):
+        assert timeline_ticks(20, base=100) == 100
+
+    def test_censored_pick_keeps_base(self):
+        assert timeline_ticks(None, base=100) == 100
+
+
 class TestAnalytic:
     def test_matches_section5_note(self):
         """§5 統計注: E[b]=2.56 dirty bits/replica, P(fail/tick)~3.8%, first fail O(10)."""
@@ -72,7 +85,16 @@ class TestAnalytic:
         assert a["p_fail_per_tick"] == pytest.approx(3 * 2.56**2 / 512, rel=1e-9)
         assert 0.03 < a["p_fail_per_tick"] < 0.05
         assert 10 < a["geometric_median"] < 25       # O(10) ticks
-        assert a["geometric_mean"] == pytest.approx(1 / a["p_fail_per_tick"])
+        # pin geometric_mean to an INDEPENDENT number, not 1/p_fail (which is tautological)
+        assert a["geometric_mean"] == pytest.approx(26.042, abs=1e-2)
+
+    def test_uses_pairwise_combination_not_R(self):
+        """The §5 model is C(R,2) birthday-pairwise, not R. At R=3 comb(3,2)==3 hides the
+        difference, so pin it at R=4 where comb(4,2)==6 != 4."""
+        a = analytic_estimate(p=0.005, bits=512, R=4)
+        eb = 512 * 0.005
+        assert a["p_fail_per_tick"] == pytest.approx(6 * eb**2 / 512, rel=1e-9)
+        assert a["p_fail_per_tick"] != pytest.approx(4 * eb**2 / 512, rel=1e-9)
 
 
 class TestDeterminismCompare:
@@ -131,9 +153,17 @@ class TestInterpolation:
     def test_solve_fstar_below_range_returns_none(self):
         assert solve_fstar(self.CURVE, 0.4) is None
 
+    def test_solve_fstar_nonmonotonic_returns_largest_f(self):
+        # recall dips below 0.9 then recovers above it before finally dropping: the largest
+        # f with recall>=0.9 is on the LAST crossing (~0.20), not the first (~0.067).
+        curve = [(0.0, 1.0), (0.1, 0.85), (0.15, 0.92), (0.3, 0.5)]
+        f = solve_fstar(curve, 0.9)
+        assert f == pytest.approx(0.15 + (0.92 - 0.9) * (0.3 - 0.15) / (0.92 - 0.5))
+        assert f > 0.15   # past the recovery, not stuck at the early dip
+
     def test_interval_ratio(self):
-        assert interval_ratio(0.101, 0.093) == pytest.approx(
-            __import__("math").log(1 - 0.101) / __import__("math").log(1 - 0.093))
+        # pin an INDEPENDENT numeric (the §7.2 headline ~1.09), not the code's own expression
+        assert interval_ratio(0.101, 0.093) == pytest.approx(1.09076, abs=1e-4)
         assert interval_ratio(0.1, 0.1) == pytest.approx(1.0)
 
 
@@ -148,6 +178,14 @@ class TestToleranceCurves:
         curves = tolerance_curves(rows, clean_recall=0.98)
         assert curves["drop"] == [(0.0, 0.98), (0.05, pytest.approx(0.92)),
                                   (0.20, pytest.approx(0.70))]
+
+    def test_crash_row_reports_and_stops(self):
+        rows = [_expb_row("uniform_accum", 0.05, "drop", 0.94),
+                _expb_row("burst_accum", 0.05, "drop", None)]   # crashed cell
+        with pytest.raises(RuntimeError, match="crash/timeout"):
+            tolerance_curves(rows, clean_recall=0.98)
+        with pytest.raises(RuntimeError, match="burst_accum"):
+            average_measured_at_fraction(rows, 0.05)
 
     def test_measured_average_at_fraction(self):
         rows = [
@@ -199,6 +237,14 @@ class TestCheckGates:
                                     self.PRED, bad)
         assert not next(g for g in gates if g["gate"] == "c_cliff")["ok"]
 
+    def test_gate_c_fails_when_delta_missing(self):
+        # delta=None (run-2 reference absent) must FAIL gate c, not pass vacuously
+        no_ref = {"deterministic_6bit": {"collapse": True, "delta": None},
+                  "k8": {"collapse": True}}
+        ok, gates = run_check_gates({"fallback_eb": 0.902, "drop": 0.885},
+                                    self.PRED, no_ref)
+        assert not next(g for g in gates if g["gate"] == "c_cliff")["ok"]
+
 
 @pytest.mark.skipif(not _HAVE_EXPB, reason="expb artifacts only on the workstation")
 class TestSection72Reproduction:
@@ -230,11 +276,15 @@ class TestSection72Reproduction:
 from phase3_g_detection import extract_points, deviation_stats
 
 
-def _g_row(pattern, fraction, actual, recovery, checked, crc_fail, consults, hits):
-    return {"pattern": pattern, "fraction": fraction, "fraction_actual": actual,
-            "recovery": recovery,
-            "stats": {"load": {"elements_checked": checked, "elements_crc_fail": crc_fail},
-                      "totals": {"consults": consults, "corrupt_hits": hits}}}
+def _g_row(pattern, fraction, actual, recovery, checked, crc_fail, consults, hits,
+           n_elements=None):
+    row = {"pattern": pattern, "fraction": fraction, "fraction_actual": actual,
+           "recovery": recovery,
+           "stats": {"load": {"elements_checked": checked, "elements_crc_fail": crc_fail},
+                     "totals": {"consults": consults, "corrupt_hits": hits}}}
+    if n_elements is not None:
+        row["n_elements"] = n_elements
+    return row
 
 
 class TestGDetection:
@@ -254,6 +304,27 @@ class TestGDetection:
         assert points[0]["observed_access"] == pytest.approx(0.05)
         assert points[1]["observed_access"] == pytest.approx(0.05)
         assert points[0]["severity"] == "light"
+
+    def test_denominator_invariant_ok(self):
+        # checked * fraction_actual == n_elements  (elements_checked == cur_element_count)
+        pts, _ = extract_points(
+            [_g_row("uniform_accum", 0.05, 0.05, "drop", 1000, 50, 2000, 100,
+                    n_elements=50)], "light")
+        assert len(pts) == 1 and pts[0]["observed_load"] == pytest.approx(0.05)
+
+    def test_denominator_invariant_violation_reports_and_stops(self):
+        # checked=900 but n_elements=50 at f_actual=0.05 implies cur_element_count=1000,
+        # i.e. elements_checked (900) != cur_element_count -> the diagonal claim is unsafe.
+        with pytest.raises(RuntimeError, match="cur_element_count"):
+            extract_points(
+                [_g_row("uniform_accum", 0.05, 0.05, "drop", 900, 45, 2000, 90,
+                        n_elements=50)], "light")
+
+    def test_detecting_mode_zero_checked_excluded_not_divzero(self):
+        # a drop/fallback_eb row with elements_checked == 0 must be excluded, not raise
+        pts, excl = extract_points(
+            [_g_row("uniform_accum", 0.05, 0.05, "drop", 0, 0, 2000, 0)], "light")
+        assert pts == [] and excl == 1
 
     def test_zero_consults_gives_none_access_ratio(self):
         points, _ = extract_points(

@@ -47,13 +47,13 @@ E5_DIR = os.path.join("artifacts", "phase3", "e5")
 EXPB_DIR = os.path.join("artifacts", "phase3", "expb")
 RUN2 = "e3c_uniform_accum_rotation_recall.records.jsonl"
 RUN3 = "e5_uniform_accum_rotation.records.jsonl"
-RUN4 = "e5_uniform_accum_rotation_replicas.records.jsonl"
-SCRUB = "e5_uniform_accum_rotation_replicas_scrub.records.jsonl"
+RUN4 = "e5_uniform_accum_rotation_replicas_fuse_newlane.records.jsonl"
+SCRUB = "e5_uniform_accum_rotation_replicas_scrub_newlane.records.jsonl"
 
 TIMELINE_LABELS = [
     ("unprotected", "run 2: no protection (collapses)"),
     ("per_query_repair", "run 3: two-layer repair (flat)"),
-    ("fuse", "run 4: replicas co-accumulate (one-shot fuse)"),
+    ("fuse", "fuse, seed 1014: replicas co-accumulate (one-shot fuse)"),
     ("self_scrub", "stage 3: vote-failure-triggered self-scrub (holds)"),
 ]
 
@@ -246,6 +246,23 @@ def synthesize(args):
                 + ("\n  -> the self-scrub run has not been produced yet; run "
                    "`bash run_stage3_x86.sh A` first (or pass --scrub-records for smoke)."
                    if lab == "self_scrub" else ""))
+    # Lane-consistency guard (audit round-2, finding 1): the fuse and self_scrub lines both inject
+    # replicas, so they must share the same replica lane — otherwise the paired "only scrub differs"
+    # comparison is a two-variable confound (the original bug: fuse on old XOR lane, scrub on new
+    # SeedSequence lane). unprotected/per_query_repair inject no replicas, so they carry no lane.
+    lanes = {}
+    for lab in ("fuse", "self_scrub"):
+        with open(paths[lab]) as fh:
+            first = json.loads(fh.readline())
+        lane = first.get("replica_lane")
+        if lane is None:
+            raise RuntimeError(
+                f"REPORT-AND-STOP: '{lab}' records carry no replica_lane marker "
+                f"({paths[lab]}); regenerate on the SeedSequence lane.")
+        lanes[lab] = lane
+    if len(set(lanes.values())) != 1:
+        raise RuntimeError(
+            f"REPORT-AND-STOP: replica-lane mismatch across main-figure lines: {lanes}")
     series = {lab: load_recall_timeline(p) for lab, p in paths.items()}
     aligned = align_timelines(series)
     csv_path = os.path.join(out_dir, "main_timeline.csv")

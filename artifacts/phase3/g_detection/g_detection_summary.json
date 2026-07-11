@@ -1,0 +1,35 @@
+{
+  "deviation": {
+    "n_points": 80,
+    "max_abs_dev_vs_truth": 0.0,
+    "mean_abs_dev_vs_truth": 0.0,
+    "max_abs_dev_vs_nominal": 0.0,
+    "identical_to_truth": true
+  },
+  "n_points": 80,
+  "excluded_rows_recovery_none_or_unchecked": 40,
+  "severities_found": {
+    "light": 4,
+    "sev384": 4
+  },
+  "source_files": {
+    "light": [
+      "/home/u01/tmouse/quant_protection/artifacts/phase3/expb/expb_burst_accum_ex_code.records.jsonl",
+      "/home/u01/tmouse/quant_protection/artifacts/phase3/expb/expb_clustered_accum_ex_code.records.jsonl",
+      "/home/u01/tmouse/quant_protection/artifacts/phase3/expb/expb_cross_row_accum_ex_code.records.jsonl",
+      "/home/u01/tmouse/quant_protection/artifacts/phase3/expb/expb_uniform_accum_ex_code.records.jsonl"
+    ],
+    "sev384": [
+      "/home/u01/tmouse/quant_protection/artifacts/phase3/expb/expb_burst_accum_ex_code_sev384.records.jsonl",
+      "/home/u01/tmouse/quant_protection/artifacts/phase3/expb/expb_clustered_accum_ex_code_sev384.records.jsonl",
+      "/home/u01/tmouse/quant_protection/artifacts/phase3/expb/expb_cross_row_accum_ex_code_sev384.records.jsonl",
+      "/home/u01/tmouse/quant_protection/artifacts/phase3/expb/expb_uniform_accum_ex_code_sev384.records.jsonl"
+    ]
+  },
+  "outputs": {
+    "csv": "/home/u01/tmouse/quant_protection/artifacts/phase3/g_detection/detection_table.csv",
+    "md": "/home/u01/tmouse/quant_protection/artifacts/phase3/g_detection/detection_table.md",
+    "figure": "/home/u01/tmouse/quant_protection/artifacts/phase3/g_detection/fig_detection_diagonal.png"
+  },
+  "note": "load-scan ratio equals injected truth by construction: numerator pinned by the in-run crc_fail==n_elements assertion, denominator verified as elements_checked==cur_element_count (extract_points stops otherwise) \u2014 evidence for \u00a73.3 'detection directly emits the decision variable', not a rediscovery of accuracy. The access-weighted ratio differs from f because query traffic is non-uniform."
+}

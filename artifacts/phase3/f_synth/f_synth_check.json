@@ -1,0 +1,56 @@
+{
+  "all_ok": true,
+  "gates": [
+    {
+      "gate": "a_headline_eb",
+      "measured": 0.8998375,
+      "predicted": 0.8996512499999999,
+      "delta": 0.00018625000000005443,
+      "ok": true
+    },
+    {
+      "gate": "b_drop_control",
+      "measured": 0.892985,
+      "predicted": 0.8919134999999999,
+      "delta": 0.001071500000000114,
+      "requires": "drop < eb and drop < 0.90",
+      "ok": true
+    },
+    {
+      "gate": "c_cliff",
+      "deterministic": {
+        "bits_injected": 6,
+        "recall": 0.42309,
+        "run2_tick0_ref": 0.42309,
+        "delta": 0.0,
+        "collapse": true
+      },
+      "k8": {
+        "recall": 0.38187000000000004,
+        "collapse": true
+      },
+      "requires": "6-bit reproduces run-2 tick-0 within tol",
+      "ok": true
+    }
+  ],
+  "measured_avg": {
+    "fallback_eb": 0.8998375,
+    "drop": 0.892985
+  },
+  "per_pattern_informational": {
+    "fallback_eb": {
+      "burst_accum": 0.8998799999999999,
+      "clustered_accum": 0.89871,
+      "cross_row_accum": 0.8999499999999999,
+      "uniform_accum": 0.9008100000000001
+    },
+    "drop": {
+      "burst_accum": 0.89265,
+      "clustered_accum": 0.89192,
+      "cross_row_accum": 0.89329,
+      "uniform_accum": 0.89408
+    }
+  },
+  "n_fstar_files": 4,
+  "tolerance": 0.01
+}

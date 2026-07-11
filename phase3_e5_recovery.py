@@ -77,6 +77,13 @@ def replica_lane_seed(root_seed, tick, r):
                .generate_state(1, dtype=np.uint64)[0])
 
 
+# Provenance marker for the replica injection lane, stamped into --inject-replicas records and
+# summaries. Kept identical to the seed batch's `seed_lane` field (first_fail_summary.json) so
+# downstream lane-consistency checks (phase3_f_synth) can compare across artifacts. Any future
+# lane change MUST bump this string so stale-lane inputs are rejected rather than silently mixed.
+REPLICA_LANE = "SeedSequence([root,tick,r+1]) (phase3_e5_recovery.replica_lane_seed)"
+
+
 class RecoveryGuard:
     """Two-layer + bounds-check recovery guard for a RaBitQ index buffer.
 
@@ -661,6 +668,8 @@ def run(args):
                     # bits currently differing from clean, per replica (post-scrub state)
                     row["replica_bits"] = [rc.cumulative_corruption()["bits_flipped"]
                                            for rc in rep_corruptors]
+                    # lane marker so downstream lane-consistency checks reject stale-lane inputs
+                    row["replica_lane"] = REPLICA_LANE
                 raw_f.write(json.dumps(row) + "\n")
                 records.append(row)
                 guard.scrub_if_due(buf, tick)
@@ -690,6 +699,7 @@ def run(args):
     if inject_replicas:
         summary["inject_replicas"] = True
         summary["final_replica_bits"] = records[-1].get("replica_bits") if records else None
+        summary["replica_lane"] = REPLICA_LANE
     out_json = os.path.join(out_dir, f"{stem}.json")
     with open(out_json, "w") as f:
         json.dump(summary, f, indent=2)

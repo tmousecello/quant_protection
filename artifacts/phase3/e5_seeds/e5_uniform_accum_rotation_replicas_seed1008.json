@@ -1,0 +1,115 @@
+{
+  "pattern": "uniform_accum",
+  "region": "rotation",
+  "ticks": 150,
+  "final_counters": {
+    "cliff_checked": 76800,
+    "cliff_repaired": 234,
+    "cliff_irrecoverable": 126,
+    "cliff_reload_triggered": 0,
+    "cliff_vote_fail_reloads": 0,
+    "cliff_anchor_checked": 0,
+    "cliff_anchor_mismatch": 0,
+    "slope_checked": 150,
+    "slope_failed": 0,
+    "slope_reloaded": 0,
+    "known_corrupted": 0,
+    "eb_fraction": 0.0,
+    "oob_elements": 0
+  },
+  "final_recall@10": null,
+  "clean_recall@10": 0.98376,
+  "adapter": "real",
+  "cfg": {
+    "ticks": 150,
+    "R": 3,
+    "chunk_size": 4096,
+    "reload_threshold": 0.1,
+    "parity_on": false,
+    "bounds_sample": 16,
+    "ef": 2000,
+    "seed": 1008,
+    "cliff_scrub": false,
+    "anchor_every": 10
+  },
+  "meta": {
+    "adapter_type": "real",
+    "platform": {
+      "machine": "x86_64",
+      "system": "Linux",
+      "hostname": "meow1",
+      "uname": [
+        "Linux",
+        "meow1",
+        "6.17.0-19-generic",
+        "#19-Ubuntu SMP PREEMPT_DYNAMIC Fri Mar  6 14:02:58 UTC 2026",
+        "x86_64"
+      ]
+    },
+    "platform_confirmed_real": true,
+    "confirmation_basis": [
+      "adapter_resolved=real",
+      "platform.machine()=x86_64",
+      "clean@10=0.98376 vs expected=0.983 -> tolerance_ok=True"
+    ],
+    "clean_baseline": {
+      "recall@10": 0.98376,
+      "expected": 0.983,
+      "diff": 0.00076,
+      "tolerance_ok": true,
+      "tol": 0.01
+    },
+    "index_geometry": {
+      "dim": 128,
+      "padded_dim": 128,
+      "num_cluster": 16,
+      "ex_bits": 6,
+      "cur_element_count": 1000000,
+      "M": 16,
+      "maxM": 16,
+      "maxM0": 32,
+      "ef_construction": 200
+    },
+    "rabitq": {
+      "library_commit": "7e39df2fcff6161af5c4a77cc3dd1709684fb52b",
+      "binaries_built_flag": true,
+      "note": "binaries_built is NOT a platform signal (stub returns True); platform is confirmed via platform_confirmed_real"
+    },
+    "study_config": {
+      "seed": 1008,
+      "k": 10,
+      "dim": 128,
+      "ef": 2000,
+      "smoke": false
+    },
+    "deps": {
+      "numpy": "2.4.6",
+      "faiss": "1.14.2"
+    },
+    "units": {
+      "pct_collapse": "percent_0_100",
+      "pct_collapse_worst_bucket": "percent_0_100",
+      "pct_collapse_overall": "percent_0_100",
+      "pct_harmful": "percent_0_100",
+      "pct_crash": "percent_0_100",
+      "pct_catastrophic": "percent_0_100",
+      "pct_benign": "percent_0_100",
+      "frac_collapse_worst_bucket": "fraction_0_1",
+      "frac_collapse_overall": "fraction_0_1",
+      "p1_single_bit_collapse": "fraction_0_1",
+      "collapse_frac": "fraction_0_1",
+      "predicted": "fraction_0_1",
+      "measured": "fraction_0_1",
+      "dRecall@10": "abs_recall_delta_0_1",
+      "mean_dRecall@10": "abs_recall_delta_0_1",
+      "max_dRecall@10": "abs_recall_delta_0_1",
+      "p99_dRecall@10": "abs_recall_delta_0_1"
+    }
+  },
+  "inject_replicas": true,
+  "final_replica_bits": [
+    202,
+    174,
+    188
+  ]
+}

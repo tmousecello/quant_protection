@@ -11,6 +11,7 @@ __pycache__/
 
 # --- logs ---
 *.log
+*.out
 
 # --- dataset (550M; fetch with fetch_sift.sh from the public SIFT1M mirror) ---
 sift/

@@ -1,0 +1,17 @@
+{
+  "adapter": "real",
+  "clean_recall@10": 0.98376,
+  "deterministic_6bit": {
+    "bits_injected": 6,
+    "recall": 0.42309,
+    "run2_tick0_ref": 0.42309,
+    "delta": 0.0,
+    "collapse": true
+  },
+  "k8": {
+    "recall": 0.38187000000000004,
+    "collapse": true
+  },
+  "e3a_k4_collapse_fraction_reference": 0.325,
+  "note": "k=4 is cited only: E3a measured collapse in 13/40 trials (0.325), so a single 4-bit trial is not expected to collapse; the deterministic gate reproduces run-2 tick-0 instead (user-approved deviation from the spec wording)"
+}

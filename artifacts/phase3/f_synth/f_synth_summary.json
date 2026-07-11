@@ -1,0 +1,107 @@
+{
+  "outputs": {
+    "main_timeline_csv": "/home/u01/tmouse/quant_protection/artifacts/phase3/f_synth/main_timeline.csv",
+    "main_timeline_png": "/home/u01/tmouse/quant_protection/artifacts/phase3/f_synth/fig_main_timeline.png",
+    "tolerance_fstar": "/home/u01/tmouse/quant_protection/artifacts/phase3/f_synth/tolerance_fstar.json",
+    "frontier_csv": "/home/u01/tmouse/quant_protection/artifacts/phase3/f_synth/frontier.csv"
+  },
+  "timeline_final_recalls": {
+    "unprotected": 2e-05,
+    "per_query_repair": 0.98376,
+    "fuse": 1e-05,
+    "self_scrub": 0.98376
+  },
+  "predictions": {
+    "headline_r_min": 0.9,
+    "headline_fraction": 0.101,
+    "pred_eb_at_headline": 0.8996512499999999,
+    "pred_drop_at_headline": 0.8919134999999999
+  },
+  "cost": {
+    "cliff": {
+      "replication_bytes": 128,
+      "checksum_bytes": 4,
+      "total_bytes": 132,
+      "by_struct": {
+        "rotation": 132
+      }
+    },
+    "slope_manifest_bytes": 16000064,
+    "index_total_bytes": 280573456,
+    "n_elements": 1000000
+  },
+  "meta": {
+    "adapter_type": "real",
+    "platform": {
+      "machine": "x86_64",
+      "system": "Linux",
+      "hostname": "meow1",
+      "uname": [
+        "Linux",
+        "meow1",
+        "6.17.0-19-generic",
+        "#19-Ubuntu SMP PREEMPT_DYNAMIC Fri Mar  6 14:02:58 UTC 2026",
+        "x86_64"
+      ]
+    },
+    "platform_confirmed_real": true,
+    "confirmation_basis": [
+      "adapter_resolved=real",
+      "platform.machine()=x86_64",
+      "clean@10=0.98376 vs expected=0.983 -> tolerance_ok=True"
+    ],
+    "clean_baseline": {
+      "recall@10": 0.98376,
+      "expected": 0.983,
+      "diff": 0.00076,
+      "tolerance_ok": true,
+      "tol": 0.01
+    },
+    "index_geometry": {
+      "dim": 128,
+      "padded_dim": 128,
+      "num_cluster": 16,
+      "ex_bits": 6,
+      "cur_element_count": 1000000,
+      "M": 16,
+      "maxM": 16,
+      "maxM0": 32,
+      "ef_construction": 200
+    },
+    "rabitq": {
+      "library_commit": "7e39df2fcff6161af5c4a77cc3dd1709684fb52b",
+      "binaries_built_flag": true,
+      "note": "binaries_built is NOT a platform signal (stub returns True); platform is confirmed via platform_confirmed_real"
+    },
+    "study_config": {
+      "seed": 1234,
+      "k": 10,
+      "dim": 128,
+      "ef": null,
+      "smoke": null
+    },
+    "deps": {
+      "numpy": "2.4.6",
+      "faiss": "1.14.2"
+    },
+    "units": {
+      "pct_collapse": "percent_0_100",
+      "pct_collapse_worst_bucket": "percent_0_100",
+      "pct_collapse_overall": "percent_0_100",
+      "pct_harmful": "percent_0_100",
+      "pct_crash": "percent_0_100",
+      "pct_catastrophic": "percent_0_100",
+      "pct_benign": "percent_0_100",
+      "frac_collapse_worst_bucket": "fraction_0_1",
+      "frac_collapse_overall": "fraction_0_1",
+      "p1_single_bit_collapse": "fraction_0_1",
+      "collapse_frac": "fraction_0_1",
+      "predicted": "fraction_0_1",
+      "measured": "fraction_0_1",
+      "dRecall@10": "abs_recall_delta_0_1",
+      "mean_dRecall@10": "abs_recall_delta_0_1",
+      "max_dRecall@10": "abs_recall_delta_0_1",
+      "p99_dRecall@10": "abs_recall_delta_0_1"
+    }
+  }
+}

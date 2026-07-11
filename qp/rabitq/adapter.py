@@ -79,6 +79,24 @@ def byte_size(path=None):
     return os.path.getsize(path or INDEX_PATH)
 
 
+def read_serialized_range(byte_start, byte_len, path=None):
+    """Read byte_len bytes at byte_start from the on-disk index (the clean source).
+
+    Deliberately a fresh file read on every call — NEVER cached in memory. The whole
+    point of the clean source is that it lives in persistent storage and is immune to
+    the DRAM fault process; caching it in memory would turn it into a fourth corruptible
+    replica and break that semantics.
+    """
+    path = path or INDEX_PATH
+    with open(path, "rb") as fh:
+        fh.seek(int(byte_start))
+        data = fh.read(int(byte_len))
+    if len(data) != int(byte_len):
+        raise IOError(f"short read from {path}: wanted {byte_len} B at {byte_start}, "
+                      f"got {len(data)} B")
+    return np.frombuffer(data, dtype=np.uint8).copy()
+
+
 # --- byte-region map ---------------------------------------------------------
 
 def read_header(path=None):

@@ -73,15 +73,21 @@ Arms:
   byte is counted, and `--no-bounds-check` reproduces the literal brief arm and its crash.
 
 PANEL B (--panel b). Three response policies, every number measured:
-  reload_full   the cold-cache cost of reading the whole index back: (i) `cat index > /dev/null`
-                (pure NVMe read -> GB/s) and (ii) one clean eval on the cold file (load + first
-                served batch). Cold is obtained by `sudo -n` drop_caches when available
-                (method="drop_caches"), else by a FRESH COPY of the index plus an explicit
-                `posix_fadvise(POSIX_FADV_DONTNEED)` on it (method="fresh_copy") — a plain copy
-                is NOT cold, since copying populates the page cache with the destination, so the
-                fadvise eviction is what actually makes the fallback honest. A warm repetition is
-                measured alongside as evidence that the cooling worked. `--reps` repetitions,
-                median + IQR.
+  reload_full   the cold-cache cost of reading the whole index back, reported as a BRACKET:
+                (i) `cat index > /dev/null` — the pure sequential read, i.e. the I/O component
+                of a reload, published as `seconds`/`gbps`; and (ii) one COMPLETE clean eval on
+                the cold file (index load + all 10K queries), published as
+                `downtime_upper_bound_full_batch_s`. (ii) is NOT "time to the first served
+                batch" — it includes the entire search, so it overstates a reload; the true
+                downtime lies between the two and the in-memory reconstruct inside hnsw.load()
+                is not separately instrumented. Cold is obtained by `sudo -n` drop_caches when
+                available (method="drop_caches"), else by a FRESH COPY of the index plus an
+                explicit `posix_fadvise(POSIX_FADV_DONTNEED)` on it (method="fresh_copy") — a
+                plain copy is NOT cold, since copying populates the page cache with the
+                destination, so the fadvise eviction is what actually makes the fallback honest.
+                Every repetition also times a WARM read, and `cache_eviction_verified` gates the
+                whole thing: cold must be >=1.5x warm or the run report-and-stops (page-cache
+                bandwidth is not an NVMe measurement). `--reps` repetitions, median + IQR.
   crash_restart HWPOISON control-path time (Task 5's helper, consumed via --control-path-json)
                 + reload_full. With no helper output the control path is written as the
                 REQUIRES_MEASUREMENT sentinel and downtime_s stays a sentinel too — never
@@ -92,11 +98,13 @@ PANEL B (--panel b). Three response policies, every number measured:
                 numbers imported from Panel A's summary.
 
 MICROBENCH (--microbench). Per-vector CRC vs per-vector distance cost, both from the real binary.
-The CRC numerator (`load.crc_scan_ns`) and the distance numerator (`search_wall_ns`) come from
-Task 6's instrumentation patch, which the currently-built binary does NOT carry — so those come
-out as REQUIRES_MEASUREMENT sentinels naming the exact stats keys to add, alongside the numbers
-that ARE measurable today (elements_checked, totals.consults, subprocess wall) and a clearly
-labelled Python-side zlib reference that is explicitly NOT the reported C++ ratio.
+The CRC numerator (`load.crc_scan_ns`) and the distance numerator (`search_wall_ns`) come from the
+instrumentation patch; a binary without it yields REQUIRES_MEASUREMENT sentinels naming the exact
+stats keys instead of a derived guess. Alongside them: elements_checked, totals.consults, the
+subprocess wall, and a clearly labelled Python-side zlib reference that is explicitly NOT the
+reported C++ ratio. The ratio is one-sided — the consult denominator carries graph traversal, so
+it OVERSTATES pure distance and the ratio therefore UNDERSTATES: read it as "CRC costs at least
+this fraction of a distance computation / is at most 1/ratio times cheaper", never the reverse.
 
 Outputs (under --out; default artifacts/phase3/e7, --smoke -> artifacts_smoke/phase3/e7):
   raw/e7_panelA.records.jsonl  one row per eval (schedule, counters, timings, error)
@@ -172,6 +180,14 @@ SINGLE_CELL_DRAW = (
 # Panel B method enums (the brief's schema).
 RELOAD_METHODS = ("drop_caches", "fresh_copy")
 CONTROL_PATH_METHODS = ("hwpoison", "mprotect_fallback")
+
+# Cold-cache verification. A cold read must be at least COLD_WARM_MIN_RATIO x the warm read of
+# the same file, or the "cold" number is page-cache bandwidth wearing an NVMe label. Below
+# MIN_COLD_TEST_BYTES the comparison is process/syscall noise rather than I/O and cannot decide
+# either way, so the verdict is None (undecidable) instead of a coin-flip True/False — that is
+# what keeps the tiny-index stub path deterministic without special-casing the stub.
+COLD_WARM_MIN_RATIO = 1.5
+MIN_COLD_TEST_BYTES = 64 << 20          # 64 MiB
 
 
 def log(msg):
@@ -315,14 +331,20 @@ def batch_repair(adapter, work, rmap, failed, field=MANIFEST_FIELD):
 # ---------------------------------------------------------------------------
 
 _COST_NUMERIC = {
-    "reload": ("seconds", "gbps"),
-    "crash_restart": ("control_path_s", "downtime_s"),
-    "eager": ("downtime_s",),
+    "reload": ("seconds", "gbps", "downtime_upper_bound_full_batch_s"),
+    "crash_restart": ("control_path_s", "downtime_s", "downtime_upper_bound_full_batch_s"),
+    "eager": ("downtime_s", "downtime_upper_bound_full_batch_s"),
     "ours": ("downtime_s", "repair_io_bytes", "repair_wall_s"),
 }
 _COST_INT = {"reload": ("bytes",), "crash_restart": ("io_bytes",), "eager": ("io_bytes",)}
-_COST_STR = {"reload": ("method",), "crash_restart": ("control_path_method", "method"),
+# `definition` and `method_detail` are REQUIRED, not decoration: doc["reload"]["seconds"] is
+# meaningless to a downstream consumer without the sentence saying it is the I/O component and
+# the one saying how the file was cooled.
+_COST_STR = {"reload": ("method", "definition", "method_detail"),
+             "crash_restart": ("control_path_method", "method"),
              "eager": ("method",), "ours": ("method",)}
+# Tri-state: True verified cold / False known-warm / None undecidable (file too small).
+_COST_TRISTATE = {"reload": ("cache_eviction_verified",)}
 _COST_ENUM = {"reload.method": RELOAD_METHODS,
               "crash_restart.control_path_method": CONTROL_PATH_METHODS}
 
@@ -365,6 +387,27 @@ def validate_cost_json(doc):
         check(block, keys, (int,), "an integer byte count")
     for block, keys in _COST_STR.items():
         check(block, keys, (str,), "a string")
+    for block, keys in _COST_TRISTATE.items():
+        for key in keys:
+            if key not in doc[block]:
+                problems.append(f"missing {block}.{key}")
+            elif doc[block][key] not in (True, False, None, SENTINEL):
+                problems.append(f"{block}.{key} must be true/false/null (or {SENTINEL}), "
+                                f"got {doc[block][key]!r}")
+
+    # A cold-cache number that failed (or could not run) its own eviction check must not be
+    # sitting in the file as a plain float — that is the exact failure this gate exists for.
+    if doc["reload"].get("cache_eviction_verified") is not True:
+        for dotted in ("reload.seconds", "reload.gbps",
+                       "reload.downtime_upper_bound_full_batch_s", "eager.downtime_s",
+                       "eager.downtime_upper_bound_full_batch_s"):
+            block, key = dotted.split(".")
+            if isinstance(doc[block].get(key), (int, float)) and not isinstance(
+                    doc[block].get(key), bool):
+                problems.append(
+                    f"{dotted} is a number but reload.cache_eviction_verified is "
+                    f"{doc['reload'].get('cache_eviction_verified')!r} — an unverified-cold read "
+                    f"is page-cache bandwidth and must be written as {SENTINEL}")
 
     for dotted, allowed in _COST_ENUM.items():
         block, key = dotted.split(".")
@@ -727,16 +770,32 @@ def run_arm(ctx, sched, arm, writer):
             f"{'crash' if ev['recall'] is None else format(ev['recall'], '.5f')}")
 
     recalls = [r["recall"] for r in records if r["recall"] is not None]
+    deltas = [r["delta_recall"] for r in records if r["delta_recall"] is not None]
+    n_crash = sum(1 for r in records if r["crashed"])
+    # CRASH-BLIND AGGREGATES ARE A LIE. An arm that was DOWN for 4 of 6 steps has no meaningful
+    # "worst recall" — averaging over only the steps it survived reports recall_min 0.98376 and
+    # max_delta_recall 0.0, i.e. the exact inverse of what happened. So the headline keys go
+    # None the moment anything crashed, and the surviving-step statistics stay available under
+    # names that say out loud which steps they cover.
     summary = {
         "arm": arm, "rows": len(records),
         "wall_s": round(time.perf_counter() - t_arm, 3),
-        "n_crash": sum(1 for r in records if r["crashed"]),
+        "n_crash": n_crash,
         "first_crash_step": next((r["step"] for r in records if r["crashed"]), None),
+        "n_rows_with_recall": len(recalls),
         "recall_first": records[0]["recall"] if records else None,
-        "recall_min": min(recalls) if recalls else None,
+        "recall_min": (min(recalls) if recalls else None) if n_crash == 0 else None,
         "recall_last": records[-1]["recall"] if records else None,
-        "max_delta_recall": max((r["delta_recall"] for r in records
-                                 if r["delta_recall"] is not None), default=None),
+        "max_delta_recall": (max(deltas, default=None)) if n_crash == 0 else None,
+        "crash_blind_note": (
+            None if n_crash == 0 else
+            f"recall_min / max_delta_recall are null because {n_crash} of {len(records)} steps "
+            f"CRASHED (first at step "
+            f"{next((r['step'] for r in records if r['crashed']), None)}): the arm was down, not "
+            f"degraded, and a min over the surviving steps would read as its best case. The "
+            f"surviving-step figures are in *_over_served_steps below."),
+        "recall_min_over_served_steps": min(recalls) if recalls else None,
+        "max_delta_recall_over_served_steps": max(deltas, default=None),
         "final_elements_crc_fail": records[-1]["elements_crc_fail"] if records else None,
         "reload_events": events,
         "n_reload_events": len(events),
@@ -944,6 +1003,33 @@ def try_drop_caches():
         return False
 
 
+def cold_measurement_verdict(cold_median, warm_median, n_bytes):
+    """Was the timed read really cold? -> (True | False | None, human-readable reason).
+
+    Pure, so the honesty gate can be unit-tested without doing 5 GB of I/O.
+
+      True   cold >= COLD_WARM_MIN_RATIO x warm on a file large enough for the comparison to be
+             about I/O — the eviction worked and the bandwidth number means what it says.
+      False  a big file whose "cold" read was no slower than its warm read. The cooling did not
+             happen; the number is page-cache bandwidth. Panel B stops rather than shipping it.
+      None   the file is smaller than MIN_COLD_TEST_BYTES (or a median is missing), so the test
+             is undecidable — process startup dominates and the ratio is noise. Not an error,
+             but not evidence either, so the derived seconds/gbps are sentinelled.
+    """
+    if not cold_median or not warm_median:
+        return None, "no timing samples to compare"
+    if int(n_bytes) < MIN_COLD_TEST_BYTES:
+        return None, (f"index is {int(n_bytes)} B < {MIN_COLD_TEST_BYTES} B: the cold-vs-warm "
+                      f"read comparison measures process overhead, not I/O, and cannot decide "
+                      f"whether the page cache was evicted")
+    ratio = cold_median / warm_median
+    if ratio >= COLD_WARM_MIN_RATIO:
+        return True, (f"cold/warm read ratio {ratio:.2f} >= {COLD_WARM_MIN_RATIO}: the page "
+                      f"cache was really evicted")
+    return False, (f"cold/warm read ratio {ratio:.2f} < {COLD_WARM_MIN_RATIO}: the 'cold' read "
+                   f"was served from the page cache, so this is not an NVMe measurement")
+
+
 def cool_file(path):
     """Evict `path` from the page cache without privileges: fsync then FADV_DONTNEED.
 
@@ -1040,12 +1126,18 @@ def measure_reload_full(ctx, cfg, reps):
             f"warm_read={warm_read[-1]:.3f}s cold_eval={cold_eval[-1]:.3f}s "
             f"warm_eval={warm_eval[-1]:.3f}s")
 
-    cr, we = _stats(cold_read), _stats(warm_eval)
-    seconds = cr["median"]
+    cr, wr, ce, we = (_stats(cold_read), _stats(warm_read), _stats(cold_eval), _stats(warm_eval))
+    verified, verdict_reason = cold_measurement_verdict(cr["median"], wr["median"], n_bytes)
+    # Every number that only means something if the file was ACTUALLY cold is gated on the
+    # verdict. A warm read reported as `seconds` would put page-cache bandwidth in the paper.
+    seconds = cr["median"] if verified else SENTINEL
+    gbps = round(n_bytes / cr["median"] / 1e9, 6) if verified and cr["median"] else SENTINEL
+    upper = ce["median"] if verified else SENTINEL
     return {
         "seconds": seconds,
         "bytes": n_bytes,
-        "gbps": round(n_bytes / seconds / 1e9, 6) if seconds else None,
+        "gbps": gbps,
+        "downtime_upper_bound_full_batch_s": upper,
         "method": method,
         "method_detail": ("sudo -n `echo 3 > /proc/sys/vm/drop_caches` before every timed read"
                           if use_drop else
@@ -1054,20 +1146,23 @@ def measure_reload_full(ctx, cfg, reps):
                           "page cache with the destination)"),
         "reps": int(reps),
         "definition": ("`seconds` is the median COLD sequential read of the whole serialized "
-                       "index (`cat index > /dev/null`) — the reload proper. `cold_eval_s` is "
-                       "the whole clean eval on the cold file (index load + the full query "
-                       "batch) and is reported separately as the service-restore upper bound; "
-                       "it is NOT used as `seconds`."),
-        "cold_read_s": cr, "warm_read_s": _stats(warm_read),
-        "cold_eval_s": _stats(cold_eval), "warm_eval_s": we,
+                       "index (`cat index > /dev/null`) — the I/O component of a reload, NOT the "
+                       "time to a serving index. `downtime_upper_bound_full_batch_s` is the "
+                       "other end of the bracket: one COMPLETE clean eval on the cold file "
+                       "(index load + all 10K queries), so it overstates a reload by the whole "
+                       "search. The true reload downtime lies between the two; the in-memory "
+                       "reconstruct inside hnsw.load() is not separately instrumented."),
+        "cold_read_s": cr, "warm_read_s": wr, "cold_eval_s": ce, "warm_eval_s": we,
         "cold_read_gbps": round(n_bytes / cr["median"] / 1e9, 6) if cr["median"] else None,
-        "warm_read_gbps": round(n_bytes / _stats(warm_read)["median"] / 1e9, 6)
-        if _stats(warm_read)["median"] else None,
-        "cache_eviction_verified": (bool(cr["median"] and _stats(warm_read)["median"]
-                                         and cr["median"] > 1.5 * _stats(warm_read)["median"])),
-        "cache_eviction_evidence": ("cold_read_s.median > 1.5x warm_read_s.median means the "
-                                    "cooling really evicted the file; if False the numbers are "
-                                    "page-cache bandwidth and must not be quoted as NVMe cost."),
+        "warm_read_gbps": round(n_bytes / wr["median"] / 1e9, 6) if wr["median"] else None,
+        "cache_eviction_verified": verified,
+        "cache_eviction_verdict": verdict_reason,
+        "cache_eviction_evidence": (
+            f"cold_read_s.median > {COLD_WARM_MIN_RATIO}x warm_read_s.median means the cooling "
+            f"really evicted the file. False => the numbers are page-cache bandwidth and "
+            f"`seconds`/`gbps`/`downtime_upper_bound_full_batch_s` are written as {SENTINEL} "
+            f"(the raw medians stay here for diagnosis). null => the file is under "
+            f"{MIN_COLD_TEST_BYTES} B, where the timing test cannot decide either way."),
         "clean_recall_on_cold_file": _stats(recalls)["median"],
     }
 
@@ -1099,9 +1194,22 @@ def run_panel_b(args, cfg):
     n_bytes = reload_full["bytes"]
     restamp_clean_baseline(ctx, args, reload_full["clean_recall_on_cold_file"])
 
+    # An unverified-cold measurement is page-cache bandwidth. Stopping is the default because a
+    # sentinel-laden cost table that nobody notices is nearly as bad as a wrong number.
+    if reload_full["cache_eviction_verified"] is False and not args.allow_unverified_cold:
+        raise RuntimeError(
+            f"REPORT-AND-STOP: the cold-cache measurement failed its own check — "
+            f"{reload_full['cache_eviction_verdict']}. Re-run on a box where the eviction works "
+            f"(passwordless sudo enables drop_caches), or pass --allow-unverified-cold to write "
+            f"the run with seconds/gbps as {SENTINEL} and the raw medians kept for diagnosis.")
+
+    cold_ok = reload_full["cache_eviction_verified"] is True
+    seconds = reload_full["seconds"]
+    upper = reload_full["downtime_upper_bound_full_batch_s"]
     cp_s, cp_method, cp_note = read_control_path(args.control_path_json)
-    downtime_crash = (round(cp_s + reload_full["seconds"], 6)
-                      if isinstance(cp_s, (int, float)) and reload_full["seconds"] else SENTINEL)
+    downtime_crash = (round(cp_s + seconds, 6)
+                      if isinstance(cp_s, (int, float)) and isinstance(seconds, (int, float))
+                      else SENTINEL)
 
     panel_a_path = args.panel_a_json or os.path.join(out, f"e7_panelA_summary{tag}.json")
     ours_repair, ours_note = None, f"panel A summary not found at {panel_a_path}"
@@ -1111,7 +1219,13 @@ def run_panel_b(args, cfg):
         ours_note = f"imported from {panel_a_path}"
 
     doc = {
-        "reload": {k: reload_full[k] for k in ("seconds", "bytes", "gbps", "method")},
+        # SELF-DESCRIBING ON PURPOSE: a consumer that reads only doc["reload"] must be able to
+        # tell what `seconds` is (the I/O component, not a time-to-serving), how the file was
+        # cooled, whether that cooling was verified, and what the other end of the bracket is —
+        # without having to know that meta.reload_full exists.
+        "reload": {k: reload_full[k] for k in
+                   ("seconds", "bytes", "gbps", "method", "downtime_upper_bound_full_batch_s",
+                    "definition", "method_detail", "cache_eviction_verified")},
         "crash_restart": {
             "control_path_s": cp_s,
             "control_path_method": cp_method,
@@ -1119,14 +1233,17 @@ def run_panel_b(args, cfg):
             "io_bytes": n_bytes,
             "method": "HWPOISON control path (Task 5 helper) + reload_full.seconds",
             "note": cp_note,
-            "downtime_upper_bound_s": (round(cp_s + reload_full["cold_eval_s"]["median"], 6)
-                                       if isinstance(cp_s, (int, float)) else SENTINEL),
+            # Named for what it actually is: control path + one COMPLETE 10K-query eval on the
+            # cold file, so it overstates a restart by the whole search batch.
+            "downtime_upper_bound_full_batch_s": (
+                round(cp_s + upper, 6) if isinstance(cp_s, (int, float))
+                and isinstance(upper, (int, float)) else SENTINEL),
         },
         "eager": {
-            "downtime_s": reload_full["seconds"],
+            "downtime_s": seconds,
             "io_bytes": n_bytes,
             "method": "full reload on the first CRC failure = reload_full.seconds (measured)",
-            "downtime_upper_bound_s": reload_full["cold_eval_s"]["median"],
+            "downtime_upper_bound_full_batch_s": upper,
         },
         "ours": {
             "downtime_s": 0,
@@ -1158,8 +1275,11 @@ def run_panel_b(args, cfg):
     path = os.path.join(out, f"e7_cost{tag}.json")
     with open(path, "w") as fh:
         json.dump(doc, fh, indent=2)
-    log(f"[e7] wrote {path} (reload {reload_full['seconds']}s, "
-        f"{reload_full['gbps']} GB/s, method={reload_full['method']})")
+    log(f"[e7] wrote {path} (reload {seconds}s, {reload_full['gbps']} GB/s, "
+        f"method={reload_full['method']}, cold_verified={reload_full['cache_eviction_verified']})")
+    if not cold_ok:
+        log(f"[e7] [warn] cold-cache check did not pass: "
+            f"{reload_full['cache_eviction_verdict']} — seconds/gbps written as {SENTINEL}.")
     return doc
 
 
@@ -1170,11 +1290,15 @@ def run_panel_b(args, cfg):
 def run_microbench(args, cfg):
     """CRC ns/vector vs distance ns/consult, both from the real binary on real data.
 
-    The two numerators live in Task 6's instrumentation patch (`load.crc_scan_ns` and
-    `search_wall_ns` in the stats JSON). The binary built here does not emit them, so they come
-    out as sentinels that NAME the missing key rather than as a derived guess. Everything that IS
-    measurable today is measured: elements_checked, totals.consults, the subprocess wall, and a
-    Python zlib reference that is explicitly not the C++ number.
+    Both numerators come from the instrumentation patch (`load.crc_scan_ns` and
+    `search_wall_ns` in the stats JSON). If the built binary does not emit them they come out as
+    sentinels that NAME the missing key rather than as a derived guess. Alongside: elements_checked,
+    totals.consults, the subprocess wall, and a Python zlib reference explicitly fenced off from
+    the reported number.
+
+    The ratio is ONE-SIDED and the direction is easy to state backwards — see `distance.caveat`
+    and `ratio_interpretation`, which spell out that it is a lower bound on the ratio and hence
+    an upper bound on how cheap CRC is.
     """
     ctx = setup_context(args, cfg, baseline=False)
     out, tag = ctx["out"], ctx["tag"]
@@ -1209,6 +1333,9 @@ def run_microbench(args, cfg):
     py_wall = time.perf_counter() - t0
     n = int(ctx["manifest"]["header"]["n_entries"])
 
+    ratio = (round(ns_per_vector / ns_per_consult, 6)
+             if isinstance(ns_per_vector, float) and isinstance(ns_per_consult, float)
+             else SENTINEL)
     doc = {
         "experiment": "e7_microbench",
         "crc": {
@@ -1216,22 +1343,38 @@ def run_microbench(args, cfg):
             "elements_checked": checked if checked is not None else SENTINEL,
             "ns_per_vector": ns_per_vector,
             "missing_key": None if crc_ns is not None else "stats.load.crc_scan_ns",
-            "note": ("crc_scan_ns comes from Task 6's patched load_crc_manifest; the currently "
-                     "built exp_dumpids emits only elements_checked / elements_crc_fail "
-                     "(exp_dumpids.cpp L193-194), so the C++ CRC time is not measured yet."),
+            "note": ("measured by the patched load_crc_manifest (stats.load.crc_scan_ns): the "
+                     "eager CRC-32 scan over every element's 96 B ex window, C++ table "
+                     "implementation under the binary's own compiler flags."
+                     if crc_ns is not None else
+                     "stats.load.crc_scan_ns is absent from this binary's stats JSON, so the "
+                     "C++ CRC time is NOT measured; rebuild with the instrumentation patch."),
         },
         "distance": {
             "search_wall_ns": search_ns if search_ns is not None else SENTINEL,
             "consults": consults if consults is not None else SENTINEL,
             "ns_per_consult": ns_per_consult,
             "missing_key": None if search_ns is not None else "stats.search_wall_ns",
-            "caveat": ("the distance denominator includes graph traversal overhead, so the "
-                       "reported ratio is a LOWER BOUND on how cheap CRC is relative to pure "
-                       "distance computation — quote it that way in the caption."),
+            # DIRECTION MATTERS AND IS EASY TO STATE BACKWARDS. ns_per_consult is search wall /
+            # consults, so it carries the graph traversal on top of the distance arithmetic and
+            # OVERSTATES a pure distance computation. Dividing by an overstated denominator
+            # understates the ratio => the reported ratio is a LOWER BOUND ON THE RATIO, i.e.
+            # CRC costs AT LEAST this fraction of a distance computation. It is therefore an
+            # UPPER bound on how cheap CRC is: "at most 1/ratio x cheaper", never "at least".
+            "caveat": ("ns_per_consult = search_wall_ns / consults includes graph traversal, so "
+                       "it overstates pure distance arithmetic. Dividing by it therefore "
+                       "UNDERSTATES the ratio: ratio_crc_per_distance is a LOWER BOUND on the "
+                       "true CRC-to-pure-distance ratio. Read it as 'CRC costs at least this "
+                       "fraction of a distance computation' — i.e. at most 1/ratio times "
+                       "cheaper, not at least."),
         },
-        "ratio_crc_per_distance": (round(ns_per_vector / ns_per_consult, 6)
-                                   if isinstance(ns_per_vector, float)
-                                   and isinstance(ns_per_consult, float) else SENTINEL),
+        "ratio_crc_per_distance": ratio,
+        "ratio_interpretation": (
+            SENTINEL if ratio == SENTINEL else
+            f"CRC costs at least {ratio * 100:.2f}% of one distance consult "
+            f"({ns_per_vector:.1f} ns/vector vs {ns_per_consult:.1f} ns/consult), i.e. AT MOST "
+            f"{1 / ratio:.0f}x cheaper. The bound is one-sided because the consult denominator "
+            f"includes traversal — see distance.caveat."),
         "measured_today": {
             "subprocess_wall_s": round(wall_s, 6),
             "subprocess_wall_note": ("whole exp_dumpids run: index load + CRC scan + the full "
@@ -1294,6 +1437,9 @@ def main(argv=None):
     ap.add_argument("--reps", type=int, default=None, help="panel B repetitions (default 5)")
     ap.add_argument("--no-sudo", action="store_true",
                     help="panel B: never attempt drop_caches; force the fresh-copy+fadvise path")
+    ap.add_argument("--allow-unverified-cold", action="store_true",
+                    help="panel B: do not stop when the cold-cache check fails; write "
+                         f"seconds/gbps as {SENTINEL} and keep the raw medians for diagnosis")
     ap.add_argument("--control-path-json", dest="control_path_json", default=None,
                     help="Task 5 HWPOISON helper output (keys control_path_s / "
                          "control_path_method); absent -> REQUIRES_MEASUREMENT sentinel")

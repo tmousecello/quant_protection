@@ -307,16 +307,55 @@ def test_pointer_repair_is_a_no_op_on_a_clean_index(rmap, clean_buf):
 
 
 # ---------------------------------------------------------------------------
+# Cold-cache verdict — the honesty gate, pure so it needs no GB of IO to test
+# ---------------------------------------------------------------------------
+
+def test_cold_verdict_true_when_the_cold_read_is_properly_slower():
+    big = e7.MIN_COLD_TEST_BYTES * 4
+    verified, reason = e7.cold_measurement_verdict(0.12, 0.022, big)
+    assert verified is True and "really evicted" in reason
+
+
+def test_cold_verdict_false_when_the_cold_read_was_served_from_cache():
+    big = e7.MIN_COLD_TEST_BYTES * 4
+    verified, reason = e7.cold_measurement_verdict(0.024, 0.022, big)
+    assert verified is False and "page cache" in reason
+
+
+def test_cold_verdict_boundary_is_the_documented_ratio():
+    big = e7.MIN_COLD_TEST_BYTES * 4
+    assert e7.cold_measurement_verdict(1.5, 1.0, big)[0] is True
+    assert e7.cold_measurement_verdict(1.49, 1.0, big)[0] is False
+
+
+def test_cold_verdict_is_undecidable_on_a_file_too_small_to_time():
+    """A 25 KB stub index cannot distinguish NVMe from cache: None, not a coin-flip boolean."""
+    verified, reason = e7.cold_measurement_verdict(0.0014, 0.0009, 25_820)
+    assert verified is None and "cannot decide" in reason
+
+
+def test_cold_verdict_is_undecidable_without_samples():
+    assert e7.cold_measurement_verdict(None, 0.02, 1 << 30)[0] is None
+    assert e7.cold_measurement_verdict(0.12, None, 1 << 30)[0] is None
+
+
+# ---------------------------------------------------------------------------
 # e7_cost.json schema
 # ---------------------------------------------------------------------------
 
 def _good_cost():
     return {
-        "reload": {"seconds": 1.5, "bytes": 280573456, "gbps": 0.19, "method": "fresh_copy"},
+        "reload": {"seconds": 1.5, "bytes": 280573456, "gbps": 0.19, "method": "fresh_copy",
+                   "downtime_upper_bound_full_batch_s": 18.0,
+                   "definition": "seconds is the cold sequential read, the I/O component",
+                   "method_detail": "fresh copy + posix_fadvise(POSIX_FADV_DONTNEED)",
+                   "cache_eviction_verified": True},
         "crash_restart": {"control_path_s": 0.01, "control_path_method": "hwpoison",
                           "downtime_s": 1.51, "io_bytes": 280573456,
+                          "downtime_upper_bound_full_batch_s": 18.01,
                           "method": "control_path + reload_full"},
-        "eager": {"downtime_s": 1.5, "io_bytes": 280573456, "method": "reload_full"},
+        "eager": {"downtime_s": 1.5, "io_bytes": 280573456, "method": "reload_full",
+                  "downtime_upper_bound_full_batch_s": 18.0},
         "ours": {"downtime_s": 0, "repair_io_bytes": 2880, "repair_wall_s": 0.004,
                  "method": "measured batch pread+patch (panel A)"},
         "meta": {"provenance": "..."},
@@ -359,6 +398,42 @@ def test_cost_json_schema_rejects_an_unknown_reload_method():
     doc = _good_cost()
     doc["reload"]["method"] = "vibes"
     assert any("reload.method" in p for p in e7.validate_cost_json(doc))
+
+
+def test_cost_json_reload_block_is_self_describing_on_its_own():
+    """A consumer reading only doc["reload"] must learn what `seconds` is, how the file was
+    cooled, whether that was verified, and the other end of the bracket — without meta."""
+    doc = _good_cost()
+    for key in ("definition", "method_detail", "cache_eviction_verified",
+                "downtime_upper_bound_full_batch_s"):
+        broken = _good_cost()
+        del broken["reload"][key]
+        assert any(f"reload.{key}" in p for p in e7.validate_cost_json(broken)), key
+    assert e7.validate_cost_json(doc) == []
+
+
+def test_cost_json_rejects_a_cold_number_whose_eviction_check_did_not_pass():
+    """The I2 gate: an unverified-cold read is page-cache bandwidth and must be sentinelled."""
+    for verdict in (False, None):
+        doc = _good_cost()
+        doc["reload"]["cache_eviction_verified"] = verdict
+        problems = e7.validate_cost_json(doc)
+        assert any("reload.seconds" in p and "cache_eviction_verified" in p for p in problems)
+        assert any("eager.downtime_s" in p for p in problems)
+
+        # ...and the same document is valid once the gated fields are sentinelled.
+        for dotted in ("reload.seconds", "reload.gbps",
+                       "reload.downtime_upper_bound_full_batch_s", "eager.downtime_s",
+                       "eager.downtime_upper_bound_full_batch_s"):
+            b, k = dotted.split(".")
+            doc[b][k] = e7.SENTINEL
+        assert e7.validate_cost_json(doc) == []
+
+
+def test_cost_json_cache_eviction_verified_must_be_tri_state():
+    doc = _good_cost()
+    doc["reload"]["cache_eviction_verified"] = "probably"
+    assert any("cache_eviction_verified" in p for p in e7.validate_cost_json(doc))
 
 
 def test_cost_json_io_bytes_must_be_the_real_index_size_not_a_guess():
@@ -465,6 +540,40 @@ def test_smoke_ours_arm_runs_and_accounts_for_the_pointer_layer(smoke_run):
     for r in ours:
         if r["oob_restored"]:
             assert r["oob_repair_bytes"] > 0 and r["oob_repair_reads"] > 0
+
+
+def test_smoke_crashed_arm_does_not_report_a_flattering_recall_min(smoke_run):
+    """I3: the ignore arm is DOWN from the device_row on. A min over the steps it survived would
+    read as its best case, so the headline aggregates must be null and say why."""
+    with open(os.path.join(smoke_run, "e7_panelA_summary.json")) as fh:
+        s = json.load(fh)
+    ig = s["arm_summary"]["ignore"]
+    assert ig["n_crash"] > 0 and ig["first_crash_step"] is not None
+    assert ig["recall_min"] is None and ig["max_delta_recall"] is None
+    assert ig["n_rows_with_recall"] == ig["rows"] - ig["n_crash"]
+    assert "CRASHED" in ig["crash_blind_note"]
+    # ...and the surviving-step figures are still available, under a name that says so.
+    assert ig["recall_min_over_served_steps"] is not None
+
+    ours = s["arm_summary"]["ours"]
+    assert ours["n_crash"] == 0
+    assert ours["recall_min"] == ours["recall_min_over_served_steps"] is not None
+    assert ours["crash_blind_note"] is None
+
+
+def test_smoke_panel_b_sentinels_an_index_too_small_to_verify_cold(tmp_path):
+    """The stub index is 25 KB, so the cold/warm test is undecidable — every derived timing
+    must come out as the sentinel rather than as a number nobody can defend."""
+    out = str(tmp_path)
+    e7.main(["--adapter", "stub", "--smoke", "--panel", "b", "--out", out, "--reps", "2"])
+    with open(os.path.join(out, "e7_cost.json")) as fh:
+        doc = json.load(fh)
+    assert e7.validate_cost_json(doc) == []
+    assert doc["reload"]["cache_eviction_verified"] is None
+    assert doc["reload"]["seconds"] == doc["reload"]["gbps"] == e7.SENTINEL
+    assert doc["eager"]["downtime_s"] == e7.SENTINEL
+    # The raw medians survive for diagnosis even though the derived numbers are sentinels.
+    assert doc["meta"]["reload_full"]["cold_read_s"]["median"] > 0
 
 
 def test_smoke_summary_breaks_the_repair_cost_into_its_two_layers(smoke_run):

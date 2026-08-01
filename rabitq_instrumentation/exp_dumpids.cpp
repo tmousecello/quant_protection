@@ -31,9 +31,16 @@
 //              load.crc_scan_ns (the eager CRC loop, hnsw.hpp) and search_wall_ns (this file:
 //              the per-query hnsw.search calls only, no IO/recall/JSON). Dividing each by its
 //              own count -- crc_scan_ns/load.elements_checked vs search_wall_ns/
-//              totals.consults -- gives the per-vector CRC cost vs the per-candidate search
-//              cost. The search denominator includes graph traversal, so the resulting ratio
-//              is a LOWER bound on how cheap CRC is against pure distance work.
+//              totals.consults -- gives the per-vector eager-scan cost vs the per-candidate
+//              search cost. Mind the DIRECTION of the bias: the denominator bundles graph
+//              traversal in with distance work, which inflates it, so the measured ratio is a
+//              LOWER bound on the true CRC-to-pure-distance ratio. The true ratio is >= the
+//              measured one, i.e. CRC is AT MOST that much cheaper and possibly far less so:
+//              an AVX2 128-d L2 kernel is ~20-40 ns against ~110 ns/vector of eager scan, so
+//              against ONE pure distance the CRC may well be the more expensive of the two.
+//              The framing to quote, which needs no such caveat, is the aggregate: the
+//              one-time eager CRC scan costs ~110.7 ms against 15.64 s of search for 10K
+//              queries at ef=2000 -- 0.71% of search time.
 // Determinism: same index file + same manifest + same flags -> identical ids (single-thread
 // search, no RNG anywhere on this path).
 #include <chrono>

@@ -34,6 +34,8 @@ parse_header() upgrades the size fields to "header-parsed" when given a real ind
 """
 import struct
 
+import numpy as np
+
 # Byte widths used in level0 offset arithmetic (header field widths now live as struct codes
 # in HEADER_FIELDS). PID = uint32 element/cluster id; FLOAT = sizeof(float) centroid/factor.
 PID = 4
@@ -240,6 +242,74 @@ def serialized_region_map(header, file_size=None):
         "header": header,
         "total_bytes": file_size,
         "regions": regions,
+    }
+
+
+# --- upper-link framing (E8) --------------------------------------------------
+
+LEN_WORD_BYTES = 4      # sizeof(unsigned int) — the per-record length prefix save() writes
+
+
+def valid_link_list_sizes(size_links_per_element, maxlevel):
+    """The complete set of link_list_size values save() can emit (hnsw.hpp L656-657).
+
+        link_list_size = element_levels_[i] > 0 ? size_links_per_element_ * element_levels_[i] : 0
+
+    and element_levels_[i] <= maxlevel_ by construction (maxlevel_ is raised to curlevel for
+    every element whose level exceeds it, hnsw.hpp L920/L926). So the value is 0 or a multiple
+    of size_links_per_element_ with quotient in [1, maxlevel]. This is the exact invariant the
+    framing guard enforces on load — exact, so it cannot reject a legitimate index.
+    """
+    slpe, ml = int(size_links_per_element), int(maxlevel)
+    if slpe <= 0:
+        raise ValueError(f"size_links_per_element must be positive, got {slpe}")
+    return {0} | {slpe * level for level in range(1, ml + 1)}
+
+
+def parse_upper_link_records(buf, n_elements, region_start, region_len):
+    """Walk the `[uint32 len][len bytes]` x n_elements stream and locate every length word.
+
+    The upper_links block has no index and no padding, so the ONLY way to know where record i
+    begins is to add up (4 + len) for every record before it — which is exactly why a single
+    corrupt length word desynchronizes everything after it (see phase3_e8_framing.py).
+
+    Returns {"lens", "len_offsets", "consumed", "framing_bytes", "payload_bytes"} where
+    `len_offsets[i]` is the ABSOLUTE buffer offset of record i's length word.
+
+    Raises ValueError unless the records tile `region_len` EXACTLY. That is the correctness
+    oracle for all the E8 region math: an exact sum is unreachable if any boundary was missed,
+    so a caller that gets a result back knows the parse is right.
+    """
+    buf = np.frombuffer(memoryview(buf), dtype=np.uint8) if not isinstance(buf, np.ndarray) \
+        else buf
+    start, length, n = int(region_start), int(region_len), int(n_elements)
+    if start < 0 or length < 0 or start + length > buf.size:
+        raise ValueError(f"upper_links region [{start},{start + length}) outside a "
+                         f"{buf.size}-byte buffer")
+    raw = buf[start:start + length].tobytes()
+    lens, offsets, off = [], [], 0
+    for i in range(n):
+        if off + LEN_WORD_BYTES > length:
+            raise ValueError(
+                f"record {i}: length word at +{off} overruns the {length}-byte upper_links "
+                f"region (stream desynchronized — the region math or the buffer is wrong)")
+        (L,) = struct.unpack_from("<I", raw, off)
+        offsets.append(start + off)
+        lens.append(int(L))
+        off += LEN_WORD_BYTES + int(L)
+        if off > length:
+            raise ValueError(
+                f"record {i}: len={L} overruns the {length}-byte upper_links region at +{off}")
+    if off != length:
+        raise ValueError(
+            f"upper-link records do not tile the region: consumed {off} B of {length} B over "
+            f"{n} records (drift {off - length:+d}). The parse is wrong; STOP.")
+    return {
+        "lens": lens,
+        "len_offsets": offsets,
+        "consumed": off,
+        "framing_bytes": LEN_WORD_BYTES * n,
+        "payload_bytes": sum(lens),
     }
 
 

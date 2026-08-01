@@ -9,9 +9,16 @@ physical SHAPE of the fault and the index REGION it lands in — and this driver
 cross product, with the two-layer recovery stack OFF and ON.
 
   shapes  {single_cell, device_row, device_column}                       (qp.faults, spec §B)
-  strata  {rotation_centroids, ex_code, bin_code, links, factors, ids}   (the anchor's region)
+  strata  {rotation, centroids, ex_code, bin_code, links, factors, ids}  (the anchor's region)
   seeds   30 (--smoke: 2)
-  arms    {off, on}                                                      -> 3*6*30*2 = 1080 evals
+  arms    {off, on}                                                      -> 3*7*30*2 = 1260 evals
+
+DEVIATION FROM THE MERGED-REGION SPEC: the spec's single `rotation_centroids` stratum is split
+into `rotation` and `centroids`. Byte-weighting a merged window is 8192:64 on the stub geometry
+(and worse on the real index), so the headline cell — a device_row landing IN the 64-byte global
+rotation, the one structure whose corruption is a single-point catastrophe — would be sampled
+under 1% of the time and is effectively unsampleable at 30 seeds. Splitting costs one extra
+stratum and makes that cell a first-class measurement.
 
 THE STRATUM PICKS THE ANCHOR, NOT THE DAMAGE. For `single_cell` the two coincide. For the device
 shapes they emphatically do not, and that gap IS the finding: RaBitQ interleaves links / ids /
@@ -26,10 +33,19 @@ Arms:
   off — flip -> deserialize -> `adapter.search_corrupted` -> recall@10 via qp.metrics.
   on  — a FRESH `phase3_e5_recovery.RecoveryGuard` per injection (R=3 rotation replicas,
         cliff_scrub, chunk_size 4096), `init_from_clean(clean_buf)`, then after the flip
-        `guard._pre_search_scrub(buf)` (cliff majority-vote repair + ex CRC + pointer
-        bounds-check/restore) and `adapter.query_with_recovery(tmp, "fallback_eb", manifest)`
-        with a CRC manifest written once from the clean index. Recall is recomputed from the
-        returned ids — never taken from the C++ side.
+        `bounds_check_full` (below) followed by `guard.scrub_only(buf)` (cliff majority-vote
+        repair + ex CRC) and `adapter.query_with_recovery(tmp, "fallback_eb", manifest)` with a
+        CRC manifest written once from the clean index. Recall is recomputed from the returned
+        ids — never taken from the C++ side.
+
+DEVIATION FROM E5's BOUNDS CHECK: E5's `_bounds_check` scans a fixed 16-element sample, which is
+right for E5 (a tick timeline where damage accumulates and any sample eventually sees it) and
+wrong for E6. A device_row anchored at element 300,000 would have exactly zero chance of a
+bounds-check hit on a 1M-element index, so `oob_restored` would be structurally ~0 and the
+pointer-protection mechanism would look useless when it was simply never invoked. E6 measures
+MECHANISM COVERAGE, not a timeline, so it runs its own vectorized FULL-index bounds check
+(`bounds_check_full`) before handing the buffer to the guard; the guard's own sampled check then
+finds nothing left, and its counter is recorded as `guard_oob_elements` as a cross-check.
 
 Outputs (under --out; default artifacts/phase3/e6, --smoke -> artifacts_smoke/phase3/e6):
   raw/e6.records.jsonl   one row per eval (anchor, coverage, field_hits, counters, error)
@@ -48,7 +64,6 @@ import argparse
 import csv
 import json
 import os
-import subprocess
 import sys
 import time
 import zlib
@@ -63,10 +78,10 @@ from qp.rawio import RawWriter
 from phase3_e5_recovery import RecoveryGuard
 
 SHAPES = ("single_cell", "device_row", "device_column")
-STRATA = ("rotation_centroids", "ex_code", "bin_code", "links", "factors", "ids")
-GLOBAL_STRATA = ("rotation_centroids",)
+STRATA = ("rotation", "centroids", "ex_code", "bin_code", "links", "factors", "ids")
+GLOBAL_STRATA = ("rotation", "centroids")
 ARMS = ("off", "on")
-OUTCOMES = ("crash", "repaired", "tolerated", "silent_wrong")
+OUTCOMES = ("crash", "repaired", "tolerated", "detected_wrong", "silent_wrong")
 
 # Per-element strata -> the layout fields they union over, IN byte-weighting order. A stratum with
 # two fields is sampled byte-weighted across both (factors 12:8 bin:ex, ids 4:4 cluster_id:label),
@@ -78,6 +93,17 @@ ELEMENT_STRATUM_FIELDS = {
     "factors": ("bin_factors", "ex_factors"),
     "ids": ("cluster_id", "label"),
 }
+# Every stratum -> the field NAMES make_field_resolver emits for it, so "how much of this fault
+# landed in the kind of structure it was aimed at" can be asked at field level (across all
+# elements) as well as at the anchor element's own field.
+STRATUM_FIELDS = dict(ELEMENT_STRATUM_FIELDS, rotation=("rotation",), centroids=("centroids",))
+
+# Pointer sentinel E5's bounds check exempts (an explicitly-empty slot, not a corrupt id); kept
+# identical here so guard_oob_elements is a meaningful cross-check of bounds_check_full.
+PTR_SENTINEL = 0xFFFFFFFF
+# Elements decoded per vectorized bounds-check pass. Bounds memory, not speed: a 1M-element index
+# at maxM0=32 would otherwise materialize ~130M uint32 at once.
+BOUNDS_CHUNK_ELEMENTS = 65536
 
 # --- outcome thresholds (named, so a reader never has to guess what 0.005 means) ---------------
 # RETENTION_TOL: recall within this of the clean baseline counts as "the query still works".
@@ -126,21 +152,19 @@ def log(msg):
 def stratum_windows(rmap, stratum, element=None):
     """Absolute [(byte_start, byte_len), ...] windows a stratum's anchor may be drawn from.
 
-    Global strata ignore `element`: `rotation_centroids` is the union of the two global decode
-    structures, centroids first (8192 B on the stub) then rotation (64 B) — the 8192:64 byte
-    weighting the spec calls for falls straight out of sampling uniformly over the union's bytes.
+    Global strata (`rotation`, `centroids`) ignore `element` and return that structure's single
+    absolute window. They are kept SEPARATE rather than merged as the spec's `rotation_centroids`
+    (see the module docstring): merged and byte-weighted, the 64-byte rotation would be drawn
+    under 1% of the time and its cell would never fill.
     Per-element strata REQUIRE `element` and go through layout.element_field_range, so the
     element stride (e*size_data_per_element) is never re-derived here.
     """
-    if stratum == "rotation_centroids":
-        out = []
-        for name in ("centroids", "rotation"):
-            r = next((x for x in rmap["regions"] if x["name"] == name), None)
-            if r is None or r["byte_start"] is None:
-                raise ValueError(f"stratum {stratum!r}: region {name!r} is not located in the "
-                                 f"region map (was the map built without file_size?)")
-            out.append((int(r["byte_start"]), int(r["byte_len"])))
-        return out
+    if stratum in GLOBAL_STRATA:
+        r = next((x for x in rmap["regions"] if x["name"] == stratum), None)
+        if r is None or r["byte_start"] is None:
+            raise ValueError(f"stratum {stratum!r} is not located in the region map "
+                             f"(was the map built without file_size?)")
+        return [(int(r["byte_start"]), int(r["byte_len"]))]
     if stratum not in ELEMENT_STRATUM_FIELDS:
         raise ValueError(f"unknown stratum {stratum!r}; choose from {STRATA}")
     if element is None:
@@ -278,18 +302,23 @@ def inject_shape(buf, shape, anchor_byte, seed, **kwargs):
 
 def classify_outcome(*, arm, recall, clean_recall, elements_crc_fail, cliff_repaired,
                      oob_restored, crashed):
-    """The 4-class outcome for one eval. Thresholds are RETENTION_TOL / DELTA_TOL above.
+    """The 5-class outcome for one eval. Thresholds are RETENTION_TOL / DELTA_TOL above.
 
-      crash        the search subprocess died or timed out (or returned nothing measurable).
-      repaired     arm ON only: recall held AND a recovery layer actually acted (cliff
-                   majority-vote repair or a pointer bounds-check restore) AND the CRC scan
-                   found nothing left to flag — i.e. the damage was put back, not worked around.
-      tolerated    recall held but the ex-data CRC still flags elements (EB-fallback carried it
-                   rather than repairing), OR the damage simply moved recall by < DELTA_TOL.
-      silent_wrong recall dropped past both bands with nothing detected — the dangerous case.
+      crash          the search subprocess died or timed out (or returned nothing measurable).
+      repaired       arm ON only: recall held AND a recovery layer actually acted (cliff
+                     majority-vote repair or a pointer bounds-check restore) AND the CRC scan
+                     found nothing left to flag — the damage was put back, not worked around.
+      tolerated      recall held but the ex-data CRC still flags elements (EB-fallback carried
+                     it rather than repairing), OR the damage moved recall by < DELTA_TOL.
+      detected_wrong arm ON only: recall did NOT hold, but the stack SAW the damage (CRC flagged
+                     elements, or the cliff/bounds layers fired). The operator gets a signal —
+                     an operationally different (and far better) failure than the next class.
+                     The P3 stripe is the archetype: 64 elements flagged, recall still gone.
+      silent_wrong   recall dropped past both bands with NO detection signal at all — the
+                     dangerous case, and the one the paper is about.
 
     Arm OFF passes None for the recovery counters (nothing was measured, as opposed to measured
-    zero) and can therefore never be classified `repaired`.
+    zero) and can therefore never be classified `repaired` or `detected_wrong`.
     """
     if crashed or recall is None:
         return "crash"
@@ -297,16 +326,114 @@ def classify_outcome(*, arm, recall, clean_recall, elements_crc_fail, cliff_repa
     repaired_ct = 0 if cliff_repaired is None else int(cliff_repaired)
     oob_ct = 0 if oob_restored is None else int(oob_restored)
     held = recall >= clean_recall - RETENTION_TOL
+    detected = crc_fail > 0 or repaired_ct > 0 or oob_ct > 0
     if arm == "on" and held and crc_fail == 0 and (repaired_ct > 0 or oob_ct > 0):
         return "repaired"
     if (held and crc_fail > 0) or (clean_recall - recall) < DELTA_TOL:
         return "tolerated"
+    if arm == "on" and detected:
+        return "detected_wrong"
     return "silent_wrong"
+
+
+# ---------------------------------------------------------------------------
+# Full-index pointer bounds check (E6's replacement for E5's 16-element sample)
+# ---------------------------------------------------------------------------
+
+def _u32_columns(mat, offset, count):
+    """Decode `count` little-endian uint32 starting at `offset` in every row of a (m, spe) view."""
+    raw = np.ascontiguousarray(mat[:, offset:offset + 4 * count]).reshape(mat.shape[0], count, 4)
+    return (raw[:, :, 0].astype(np.uint32)
+            | (raw[:, :, 1].astype(np.uint32) << 8)
+            | (raw[:, :, 2].astype(np.uint32) << 16)
+            | (raw[:, :, 3].astype(np.uint32) << 24))
+
+
+def bounds_check_full(work, clean_buf, rmap):
+    """Vectorized FULL-index pointer bounds check + restore. Returns (n_fields_restored, detail).
+
+    Why E6 has its own instead of using E5's `_bounds_check`: see the module docstring — E5's
+    fixed 16-element sample cannot see a fault at element 300,000, so on a 1M-element index it
+    would report `oob_restored ~ 0` for reasons that have nothing to do with the mechanism.
+
+    Rules (a superset of E5's, which does not check the neighbour COUNT — the field whose
+    corruption to 4 billion is the classic crash vector):
+      links       count > maxM0, or any of the maxM0 physically-present neighbour slots holds an
+                  id >= cur_element_count. Slots are scanned by their FIXED window, never by the
+                  on-disk count, which may itself be the corrupted field.
+      cluster_id  >= num_cluster        label  >= cur_element_count
+    PTR_SENTINEL (0xFFFFFFFF) is exempt for ids exactly as in E5 (an explicitly-empty slot), but
+    NOT for the count. A flagged field is restored wholesale from `clean_buf` — the faithful
+    "skip the bad edge" that keeps the structure instead of losing it — and counted, one per
+    (element, field), matching E5's `oob_elements` accounting.
+
+    Elements are decoded in chunks (BOUNDS_CHUNK_ELEMENTS) so peak memory stays flat regardless
+    of index size; on the SIFT1M geometry the whole pass is a couple of hundred milliseconds.
+    """
+    hdr = rmap["header"]
+    n = int(hdr["cur_element_count"])
+    spe = int(hdr["size_data_per_element"])
+    maxM0 = int(hdr["maxM0"])
+    num_cluster = int(hdr["num_cluster"])
+    if n == 0:
+        return 0, {}
+    level0 = next(r for r in rmap["regions"] if r["name"] == "level0")
+    l0s = int(level0["byte_start"])
+    geom = {}
+    for field in ("links", "cluster_id", "label"):
+        try:
+            start, length = layout.element_field_range(rmap, field, 0)
+        except (KeyError, IndexError):
+            continue
+        geom[field] = (int(start) - l0s, int(length))
+
+    restored, detail = 0, {}
+    for lo in range(0, n, BOUNDS_CHUNK_ELEMENTS):
+        hi = min(n, lo + BOUNDS_CHUNK_ELEMENTS)
+        base = l0s + lo * spe
+        mat = work[base: base + (hi - lo) * spe].reshape(hi - lo, spe)
+        for field, (off, length) in geom.items():
+            if field == "links":
+                if length < 8:
+                    continue
+                n_slots = min(maxM0, (length - 4) // 4)
+                words = _u32_columns(mat, off, 1 + n_slots)
+                bad = (words[:, 0] > maxM0)
+                ids = words[:, 1:]
+                bad |= ((ids >= n) & (ids != PTR_SENTINEL)).any(axis=1)
+            else:
+                if length < 4:
+                    continue
+                val = _u32_columns(mat, off, 1)[:, 0]
+                limit = num_cluster if field == "cluster_id" else n
+                bad = (val >= limit) & (val != PTR_SENTINEL)
+            flagged = np.flatnonzero(bad)
+            if not flagged.size:
+                continue
+            for e in flagged.tolist():
+                s = l0s + (lo + e) * spe + off
+                work[s: s + length] = clean_buf[s: s + length]
+            restored += int(flagged.size)
+            detail[field] = detail.get(field, 0) + int(flagged.size)
+    return restored, detail
 
 
 # ---------------------------------------------------------------------------
 # Sanity gates
 # ---------------------------------------------------------------------------
+
+def stub_sandbox_ok(aname, out_dir):
+    """False iff the stub would write into the real artifacts tree. The gate's single predicate.
+
+    `sanity.stub_sandbox_ok` in the summary is derived from THIS, not hardcoded — a hardcoded
+    True is a gate that reports itself green without ever having run.
+    """
+    if aname != "stub":
+        return True
+    real_root = os.path.join(os.path.abspath(config.ROOT), "artifacts")
+    target = os.path.abspath(out_dir)
+    return not (target == real_root or target.startswith(real_root + os.sep))
+
 
 def assert_stub_sandbox(aname, out_dir):
     """House convention: stub output NEVER lands under artifacts/ (only artifacts_smoke/).
@@ -314,14 +441,11 @@ def assert_stub_sandbox(aname, out_dir):
     A stub number that ends up in the real artifacts tree is indistinguishable from a measured
     one three months later, so this is a hard stop rather than a warning.
     """
-    if aname != "stub":
-        return
-    real_root = os.path.join(os.path.abspath(config.ROOT), "artifacts")
-    target = os.path.abspath(out_dir)
-    if target == real_root or target.startswith(real_root + os.sep):
+    if not stub_sandbox_ok(aname, out_dir):
         raise RuntimeError(
             f"REPORT-AND-STOP: stub adapter would write documented-fake results into the real "
-            f"artifacts tree ({target}). Use --smoke (-> artifacts_smoke/) or an explicit --out.")
+            f"artifacts tree ({os.path.abspath(out_dir)}). Use --smoke (-> artifacts_smoke/) "
+            f"or an explicit --out.")
 
 
 def assert_row_count(records, seeds):
@@ -381,6 +505,27 @@ def setup_context(args, cfg):
     crc0 = int((clean_rec.get("stats") or {}).get("load", {}).get("elements_crc_fail", 0))
     if crc0 != 0:
         raise RuntimeError(f"pre-flight: recovery path flags {crc0} elements on the CLEAN index")
+    # ...and its RECALL must match the arm-off baseline, else the two arms are measured against
+    # different operating points and every delta_recall on the on-arm is rebased to garbage.
+    # (Computing this search and throwing away its ids was review finding I2.)
+    clean_rec_recall = float(metrics.recall_at_k(clean_rec["ids"], gt, config.K))
+    if abs(clean_rec_recall - clean_recall) > RETENTION_TOL:
+        raise RuntimeError(
+            f"REPORT-AND-STOP: recovery path returns recall@10={clean_rec_recall:.6f} on the "
+            f"CLEAN index vs {clean_recall:.6f} for the plain search — a gap of "
+            f"{abs(clean_rec_recall - clean_recall):.6f} > {RETENTION_TOL}. The arms would be "
+            f"measured against different baselines.")
+
+    # The full-index bounds check must be a no-op on a clean index; if the real index's labels or
+    # cluster ids fall outside the ranges E5's rule assumes, arm on would "restore" clean fields
+    # on every eval and report fictitious oob_restored counts.
+    clean_oob, clean_oob_detail = bounds_check_full(clean_buf.copy(), clean_buf, rmap)
+    if clean_oob:
+        raise RuntimeError(
+            f"REPORT-AND-STOP: bounds_check_full flags {clean_oob} field(s) on the CLEAN index "
+            f"({clean_oob_detail}) — the pointer validity rule does not match this index's "
+            f"conventions, so arm-on oob_restored would be fiction.")
+    _sweep_sidecars(tmp)
 
     meta = provenance.collect_provenance(
         adapter, aname, {"recall@10": clean_recall}, cfg, args, rmap,
@@ -395,9 +540,26 @@ def setup_context(args, cfg):
                    "datasheet DRAM geometry — treat as sensitivity knobs, not hardware facts."),
     }
     meta["outcome_thresholds"] = {"retention_tol": RETENTION_TOL, "delta_tol": DELTA_TOL}
+    meta["clean_baseline_both_paths"] = {
+        "search_corrupted_recall@10": clean_recall,
+        "query_with_recovery_recall@10": clean_rec_recall,
+        "abs_diff": round(abs(clean_rec_recall - clean_recall), 9),
+        "gate": f"abs_diff <= RETENTION_TOL ({RETENTION_TOL})",
+    }
+    meta["spec_deviations"] = {
+        "strata_split": ("spec E1 merges rotation+centroids into one stratum; E6 splits them. "
+                         "Byte-weighted over the merged window the 64-B rotation is drawn <1% of "
+                         "the time, so the row-in-rotation headline cell would never fill. "
+                         f"Grid is {len(SHAPES)}x{len(STRATA)}x{cfg['seeds']}x{len(ARMS)}."),
+        "bounds_check": ("arm ON uses E6's vectorized FULL-index pointer bounds check instead of "
+                         "E5's fixed 16-element sample: E6 measures mechanism coverage, not E5's "
+                         "accumulation timeline, and a sampled check cannot see a fault at "
+                         "element 300,000. The guard's own counter is kept as guard_oob_elements."),
+    }
 
     log(f"[e6] adapter={aname} out={out} clean@10={clean_recall:.5f} "
-        f"n={rmap['header']['cur_element_count']} ef={cfg['ef']} seeds={cfg['seeds']}")
+        f"(recovery path {clean_rec_recall:.5f}) n={rmap['header']['cur_element_count']} "
+        f"ef={cfg['ef']} seeds={cfg['seeds']}")
     return {"adapter": adapter, "aname": aname, "out": out, "tag": tag, "rmap": rmap,
             "clean_buf": clean_buf, "gt": gt, "tmp": tmp, "manifest_path": manifest_path,
             "clean_recall": clean_recall, "meta": meta, "cfg": cfg,
@@ -405,40 +567,68 @@ def setup_context(args, cfg):
 
 
 def _sweep_sidecars(tmp):
-    for stale in (tmp + ".ids.ivecs", tmp + ".ids.ivecs.dist.fvecs",
-                  tmp + ".rec.ivecs", tmp + ".rec.ivecs.dist.fvecs"):
-        try:
-            os.remove(stale)
-        except OSError:
-            pass
+    for suffix in (".ids.ivecs", ".rec.ivecs", ".clean.ivecs", ".cleanrec.ivecs"):
+        for stale in (tmp + suffix, tmp + suffix + ".dist.fvecs"):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
 
 
-def _restore(work, clean_buf, positions, arm):
-    """Undo one injection and verify locally that the buffer is back to clean.
+def _verify_and_restore(work, clean_buf, positions, arm, scratch=None):
+    """Verify the buffer differs from clean ONLY where this injection reached, THEN restore.
 
-    Arm OFF re-XORs the exact positions (the phase1 D1 identity guarantee). Arm ON CANNOT: the
-    RecoveryGuard writes into `work` itself (rotation majority-vote repair, pointer restores), so
-    re-XORing the injected positions would leave the guard's edits behind AND re-corrupt what it
-    fixed; the clean bytes are copied back wholesale instead. Either way the touched bytes are
-    then compared against clean — a leak would silently bias every later eval.
+    The verification has to happen BEFORE the restore, and the previous version of this function
+    got that exactly backwards: arm ON restores by copying `clean_buf` wholesale, so any check
+    made afterwards compares clean against clean and is 0 by construction. Since the arms loop
+    ends on `on`, that also made the end-of-sweep whole-buffer check vacuous — review I1 proved
+    it empirically by injecting a stray byte and still seeing "leak 0".
+
+    What is actually checked here, against the diff BEFORE any restore:
+      arm off — the differing byte set must equal the touched byte set EXACTLY. Every touched
+                byte must differ (XOR-ing >=1 distinct bit always changes a byte), and nothing
+                else may differ.
+      arm on  — the differing set must be a SUBSET of the touched set. It is a strict subset
+                whenever a recovery layer put something back; a byte outside the injection that
+                differs from clean means something wrote where it had no business writing.
+
+    `scratch` is an optional preallocated bool array (buffer-sized) so the whole-buffer compare
+    doesn't allocate on every one of the 1,260 evals.
     """
+    touched = {int(b) for b, _ in positions}
+    if scratch is not None:
+        np.not_equal(work, clean_buf, out=scratch)
+        diff = set(int(b) for b in np.flatnonzero(scratch))
+    else:
+        diff = set(int(b) for b in np.flatnonzero(work != clean_buf))
+
+    stray = sorted(diff - touched)
+    if stray:
+        raise RuntimeError(
+            f"state leak (arm={arm}): {len(stray)} byte(s) differ from clean OUTSIDE the "
+            f"{len(touched)} bytes this injection touched, e.g. {stray[:8]} — something wrote "
+            f"outside the fault footprint, and every later eval would inherit it.")
+    if arm == "off":
+        unchanged = sorted(touched - diff)
+        if unchanged:
+            raise RuntimeError(
+                f"injection bookkeeping bug: {len(unchanged)} byte(s) recorded as flipped are "
+                f"identical to clean, e.g. {unchanged[:8]} — positions and buffer disagree.")
+
     if arm == "off":
         faults.restore(work, positions)
     else:
+        # The guard writes into `work` itself (rotation repair, pointer restores), so re-XORing
+        # the injected positions would leave its edits behind AND re-corrupt what it fixed.
         np.copyto(work, clean_buf)
-    if positions:
-        idx = np.fromiter({int(b) for b, _ in positions}, dtype=np.int64)
-        drift = int(np.count_nonzero(work[idx] != clean_buf[idx]))
-        if drift:
-            raise RuntimeError(f"state leaked across evals: {drift} touched bytes differ from "
-                               f"clean after restore (arm={arm})")
+    return len(diff)
 
 
 # ---------------------------------------------------------------------------
 # One eval
 # ---------------------------------------------------------------------------
 
-def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm):
+def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm, scratch=None):
     """Inject one shape at one anchor, measure one arm, restore. Returns the raw record."""
     adapter, cfg = ctx["adapter"], ctx["cfg"]
     kwargs = shape_kwargs(shape, cfg)
@@ -452,10 +642,14 @@ def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm):
     positions, record = inject_shape(work, shape, anchor["anchor_byte"],
                                      lane_seed(seed, LANE_INJECT), **kwargs)
     recall = elements_crc_fail = fallbacks = cliff_repaired = oob_restored = None
+    guard_oob = oob_detail = None
     crashed, error = False, ""
     try:
         if guard is not None:
-            guard._pre_search_scrub(work)                # cliff vote/repair + ex CRC + bounds
+            # E6's own full-index pointer check runs FIRST, so the guard's sampled one finds
+            # nothing left and its counter becomes a cross-check rather than a second opinion.
+            oob_restored, oob_detail = bounds_check_full(work, ctx["clean_buf"], ctx["rmap"])
+            guard.scrub_only(work)                       # cliff vote/repair + ex CRC (public API)
         adapter.deserialize_index(work, ctx["tmp"])
         try:
             if arm == "off":
@@ -469,7 +663,12 @@ def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm):
                                                   out_path=ctx["tmp"] + ".rec.ivecs",
                                                   timeout=ctx["timeout"])
                 stats = res.get("stats") or {}
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        # Anything the search raises is an outcome of the corruption, not a harness bug: a
+        # corrupted header can make the adapter's own parsing blow up (struct.error, ValueError,
+        # MemoryError) long before a subprocess is ever spawned, and silently propagating that
+        # would abort a 6-hour sweep at eval 300. KeyboardInterrupt/SystemExit are BaseException
+        # and deliberately still propagate.
+        except Exception as exc:                                    # noqa: BLE001
             crashed, error = True, repr(exc)
         else:
             recall = float(metrics.recall_at_k(res["ids"], ctx["gt"], config.K))
@@ -479,9 +678,12 @@ def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm):
         if guard is not None:
             ctr = guard.counters()                       # counters are valid even after a crash
             cliff_repaired = int(ctr["cliff_repaired"])
-            oob_restored = int(ctr["oob_elements"])
+            guard_oob = int(ctr["oob_elements"])
+            if guard_oob:
+                log(f"[e6] [warn] guard's sampled bounds check flagged {guard_oob} field(s) "
+                    f"AFTER bounds_check_full ran — the two rules disagree ({shape}/{stratum}).")
     finally:
-        _restore(work, ctx["clean_buf"], positions, arm)
+        _verify_and_restore(work, ctx["clean_buf"], positions, arm, scratch=scratch)
         _sweep_sidecars(ctx["tmp"])
 
     outcome = classify_outcome(arm=arm, recall=recall, clean_recall=ctx["clean_recall"],
@@ -490,7 +692,9 @@ def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm):
     lo, hi = record["coverage"]
     windows = stratum_windows(ctx["rmap"], stratum, element=anchor["element"])
     touched = {int(b) for b, _ in positions}
-    in_stratum = sum(1 for b in touched if any(s <= b < s + L for s, L in windows))
+    in_element_field = sum(1 for b in touched if any(s <= b < s + L for s, L in windows))
+    field_hits = count_field_hits(ctx["rmap"], positions, resolver=ctx["resolver"])
+    in_field = sum(field_hits.get(f, 0) for f in STRATUM_FIELDS[stratum])
     return {
         "shape": shape, "region": stratum, "seed": int(seed), "seed_index": int(seed_index),
         "arm": arm, "recall": recall,
@@ -503,8 +707,14 @@ def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm):
         "element": anchor["element"], "anchor_byte": int(anchor["anchor_byte"]),
         "anchor_window": list(anchor["window"]), "anchor_window_index": anchor["window_index"],
         "coverage_lo": int(lo), "coverage_hi": int(hi), "coverage_span_bytes": int(hi - lo),
-        "bytes_in_anchor_stratum": int(in_stratum),
-        "field_hits": count_field_hits(ctx["rmap"], positions, resolver=ctx["resolver"]),
+        # Two different questions, both worth answering. ELEMENT_FIELD: how much landed in the
+        # anchor element's own field (near 0 for the device shapes — they leave the element).
+        # FIELD: how much landed in that KIND of field anywhere in the index (much larger, since
+        # a row crosses ~30 elements' worth of the same interleaved fields).
+        "bytes_in_anchor_element_field": int(in_element_field),
+        "bytes_in_anchor_field": int(in_field),
+        "field_hits": field_hits,
+        "guard_oob_elements": guard_oob, "oob_by_field": oob_detail,
         "clean_recall": ctx["clean_recall"], "adapter": ctx["aname"],
         "shape_kwargs": kwargs, "error": error,
     }
@@ -531,18 +741,25 @@ def summarize(records):
             grp = [r for r in records if r["shape"] == shape and r["region"] == stratum]
             if grp:
                 touched = [r["coverage_bytes"] for r in grp]
-                inside = [r["bytes_in_anchor_stratum"] for r in grp]
+                in_elem = [r["bytes_in_anchor_element_field"] for r in grp]
+                in_field = [r["bytes_in_anchor_field"] for r in grp]
                 fields = {}
                 for r in grp:
                     for f, c in r["field_hits"].items():
                         fields[f] = fields.get(f, 0) + c
                 smear[f"{shape}|{stratum}"] = {
                     "median_bytes_touched": _median(touched),
-                    "median_bytes_in_anchor_stratum": _median(inside),
-                    # The headline of the smear finding: for the device shapes this is ~0, i.e.
-                    # almost none of the damage lands in the field the stratum aimed at.
-                    "median_fraction_in_anchor_stratum": _median(
-                        [i / t if t else None for i, t in zip(inside, touched)]),
+                    # Two nested questions. ELEMENT_FIELD: did the damage stay in the exact field
+                    # the anchor named? For the device shapes this collapses to ~0 — they walk
+                    # straight out of the element. FIELD: did it at least stay in that KIND of
+                    # field, anywhere in the index? Much larger, and the honest number to quote
+                    # when asking whether a per-field protection scheme would have covered it.
+                    "median_bytes_in_anchor_element_field": _median(in_elem),
+                    "median_fraction_in_anchor_element_field": _median(
+                        [i / t if t else None for i, t in zip(in_elem, touched)]),
+                    "median_bytes_in_anchor_field": _median(in_field),
+                    "median_fraction_in_anchor_field": _median(
+                        [i / t if t else None for i, t in zip(in_field, touched)]),
                     "fields_hit": dict(sorted(fields.items(), key=lambda kv: (-kv[1], kv[0]))),
                 }
             for arm in ARMS:
@@ -577,6 +794,30 @@ def write_csv(path, records):
 # --sweep (default mode)
 # ---------------------------------------------------------------------------
 
+def _final_research_gate(ctx, work):
+    """Re-search the RESTORED buffer once and require the clean recall back, unchanged.
+
+    The house `assert_no_state_leak` pattern (phase3_e1_vuln.py). A byte compare says the bytes
+    match; this says the index still ANSWERS the same, which also covers anything that leaked
+    through a path the byte compare cannot see (a stale sidecar being read, a tmp file not
+    rewritten). Tolerance is exact for the deterministic stub and loosened for the real C++
+    search's float/threading jitter, as in E1.
+    """
+    ctx["adapter"].deserialize_index(work, ctx["tmp"])
+    res = ctx["adapter"].search_corrupted(ctx["tmp"], k=config.K, ef=int(ctx["cfg"]["ef"]),
+                                          out_path=ctx["tmp"] + ".clean.ivecs",
+                                          timeout=ctx["timeout"])
+    after = float(metrics.recall_at_k(res["ids"], ctx["gt"], config.K))
+    _sweep_sidecars(ctx["tmp"])
+    drift = abs(after - ctx["clean_recall"])
+    tol = 1e-9 if ctx["aname"] == "stub" else 1e-6
+    if drift > tol:
+        raise RuntimeError(
+            f"state leaked across the sweep: re-searching the restored buffer gives "
+            f"recall@10={after:.9f} vs clean {ctx['clean_recall']:.9f} (drift {drift:.2e} > {tol})")
+    return drift
+
+
 def run(args):
     cfg = dict(SMOKE if args.smoke else FULL)
     if getattr(args, "seeds", None) is not None:
@@ -586,6 +827,8 @@ def run(args):
     for knob in ("row_bytes", "n_rows"):
         if getattr(args, knob, None) is not None:
             cfg[knob] = int(getattr(args, knob))
+    if getattr(args, "p_in_row", None) is not None:
+        cfg["p_in_row"] = float(args.p_in_row)
 
     ctx = setup_context(args, cfg)
     out, tag = ctx["out"], ctx["tag"]
@@ -596,9 +839,20 @@ def run(args):
         log("[e6] --resume: reloading completed shard")
         with open(raw_path) as fh:
             records = [json.loads(line) for line in fh]
+        # A shard measured against a different clean baseline (different index / ef / adapter)
+        # would silently mix two operating points into one damage matrix.
+        prior = next((r["clean_recall"] for r in records if r.get("clean_recall") is not None),
+                     None)
+        if prior is not None and abs(prior - ctx["clean_recall"]) > RETENTION_TOL:
+            raise RuntimeError(
+                f"REPORT-AND-STOP: --resume shard was measured at clean recall@10={prior:.6f} "
+                f"but this run's clean baseline is {ctx['clean_recall']:.6f} — different index, "
+                f"ef, or adapter. Re-run without --resume.")
         leak = None          # not re-verified on resume; the shard's own run already gated it
+        research_drift = None
     else:
         work = ctx["clean_buf"].copy()
+        scratch = np.empty(work.size, dtype=bool)        # reused by the per-eval leak gate
         records = []
         t0 = time.time()
         with RawWriter(raw_path, done_path=done_path) as w:
@@ -608,21 +862,29 @@ def run(args):
                     for i in range(int(cfg["seeds"])):
                         seed = cell_seed(args.seed, shape, stratum, i)
                         anchor = sample_anchor(ctx["rmap"], stratum, seed)
+                        # Both arms share the anchor AND the injector seed, so off/on is a
+                        # PAIRED comparison of the same physical fault, not two samples.
                         for arm in ARMS:
                             records.append(w.write(measure_cell(
-                                ctx, work, shape, stratum, i, seed, anchor, arm)))
+                                ctx, work, shape, stratum, i, seed, anchor, arm,
+                                scratch=scratch)))
                     cell = records[-2 * int(cfg["seeds"]):]
                     hist = {o: sum(1 for r in cell if r["outcome"] == o) for o in OUTCOMES}
                     log(f"[e6] {shape:<14} {stratum:<18} "
                         f"{time.time() - tc:6.1f}s  "
                         f"bits~{int(np.median([r['bits_flipped'] for r in cell]))}  "
                         f"{ {k: v for k, v in hist.items() if v} }")
-        # Whole-buffer leak check once at the end: the per-eval check covers the touched bytes,
-        # this catches anything that wrote OUTSIDE them (e.g. a guard reload gone wrong).
+        # Two independent end-of-sweep gates. The byte compare is nearly free but WEAK on its own
+        # (the arms loop ends on `on`, whose restore copies clean bytes, so it is 0 by
+        # construction — review I1); the per-eval before-restore gate in _verify_and_restore is
+        # what actually catches a stray write. The re-search is the house assert_no_state_leak:
+        # it proves the restored buffer still answers queries exactly like the clean index.
         leak = int(np.count_nonzero(work != ctx["clean_buf"]))
         if leak:
             raise RuntimeError(f"state leaked across the sweep: {leak} bytes differ from clean")
-        log(f"[e6] {len(records)} evals in {time.time() - t0:.1f}s (state leak {leak} bytes)")
+        research_drift = _final_research_gate(ctx, work)
+        log(f"[e6] {len(records)} evals in {time.time() - t0:.1f}s "
+            f"(leak {leak} bytes, re-search drift {research_drift:.2e})")
 
     expected = assert_row_count(records, cfg["seeds"])
     cells, smear = summarize(records)
@@ -635,7 +897,11 @@ def run(args):
         "cells": cells, "smear": smear,
         "sanity": {"row_count_ok": len(records) == expected, "expected_rows": expected,
                    "rows": len(records), "state_leak_bytes": leak,
-                   "stub_sandbox_ok": True},
+                   # The gate that can actually fail: every eval compared work against clean
+                   # BEFORE restoring and required the diff to sit inside the fault footprint.
+                   "per_eval_footprint_gate_evals": 0 if leak is None else len(records),
+                   "final_research_drift": research_drift,
+                   "stub_sandbox_ok": stub_sandbox_ok(ctx["aname"], out)},
         "adapter": ctx["aname"], "meta": ctx["meta"],
     }
     with open(os.path.join(out, f"e6_summary{tag}.json"), "w") as fh:
@@ -691,6 +957,7 @@ def run_p3(args):
 
     ctx = setup_context(args, cfg)
     work = ctx["clean_buf"].copy()
+    scratch = np.empty(work.size, dtype=bool)
     rows, modes = [], {}
     for mode in P3_MODES:
         per_mode = []
@@ -713,7 +980,10 @@ def run_p3(args):
                                               {**GUARD_CFG, "ef": int(cfg["ef"]), "seed": seed},
                                               ctx["rmap"])
                         guard.init_from_clean(ctx["clean_buf"])
-                        guard._pre_search_scrub(work)
+                        oob, _ = bounds_check_full(work, ctx["clean_buf"], ctx["rmap"])
+                        guard.scrub_only(work)
+                        row["oob_restored"] = oob
+                        row["cliff_repaired"] = int(guard.counters()["cliff_repaired"])
                         ctx["adapter"].deserialize_index(work, ctx["tmp"])
                         res = ctx["adapter"].query_with_recovery(
                             ctx["tmp"], RECOVERY_MODE, ctx["manifest_path"], k=config.K,
@@ -727,18 +997,18 @@ def run_p3(args):
                         row["elements_crc_fail"] = int(
                             stats.get("load", {}).get("elements_crc_fail", 0))
                         row["fallbacks"] = int(stats.get("totals", {}).get("fallbacks", 0))
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                except Exception as exc:                            # noqa: BLE001
                     row[f"recall_{arm}"] = None
                     row[f"delta_recall_{arm}"] = None
                     row[f"error_{arm}"] = repr(exc)
                 finally:
-                    # arm on lets the guard write into `work`; copy clean back rather than
-                    # re-XOR (same reasoning as _restore).
-                    if arm == "off":
-                        flip_bits(work, positions)
-                    else:
-                        np.copyto(work, ctx["clean_buf"])
+                    _verify_and_restore(work, ctx["clean_buf"], positions, arm, scratch=scratch)
                     _sweep_sidecars(ctx["tmp"])
+            row["outcome_on"] = classify_outcome(
+                arm="on", recall=row.get("recall_on"), clean_recall=ctx["clean_recall"],
+                elements_crc_fail=row.get("elements_crc_fail"),
+                cliff_repaired=row.get("cliff_repaired"), oob_restored=row.get("oob_restored"),
+                crashed=row.get("recall_on") is None)
             per_mode.append(row)
             rows.append(row)
         modes[mode] = {
@@ -749,6 +1019,9 @@ def run_p3(args):
             "median_delta_recall_on": _median([r.get("delta_recall_on") for r in per_mode]),
             "median_elements_crc_fail": _median([r.get("elements_crc_fail") for r in per_mode]),
             "median_fallbacks": _median([r.get("fallbacks") for r in per_mode]),
+            "outcomes_on": {o: sum(1 for r in per_mode if r.get("outcome_on") == o)
+                            for o in OUTCOMES
+                            if any(r.get("outcome_on") == o for r in per_mode)},
             "n_crash": sum(1 for r in per_mode if r.get("recall_off") is None
                            or r.get("recall_on") is None),
         }
@@ -793,6 +1066,9 @@ def main(argv=None):
                     help="DRAM row modeling unit in bytes (default 8192 — a knob, not a fact)")
     ap.add_argument("--n-rows", dest="n_rows", type=int, default=None,
                     help="rows a device_column stripe runs through (default 512)")
+    ap.add_argument("--p-in-row", dest="p_in_row", type=float, default=None,
+                    help="per-bit flip probability inside a failed row (default 0.5 = a fully "
+                         "failed row); lower values model a partially-failed row")
     ap.add_argument("--timeout", type=float, default=900.0,
                     help="per-search seconds; a hang under corruption records as crash")
     ap.add_argument("--weights", default=None,

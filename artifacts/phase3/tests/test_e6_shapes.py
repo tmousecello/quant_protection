@@ -4,13 +4,17 @@ Everything here runs offline against the STUB geometry (arm64-safe, faiss-free).
   - `stratum_windows` agrees with qp.rabitq.layout arithmetic for every stratum (global and
     per-element), including the spec's "`ids` = two 4-byte windows per element" case;
   - `sample_anchor` is pure/deterministic in seed and byte-weighted across a stratum's windows
-    (8192:64 for rotation_centroids, 12:8 for factors, 4:4 for ids);
+    (12:8 for factors, 4:4 for ids), and the split global strata each fill their own cell;
   - `field_at_byte` / `count_field_hits` resolve absolute bytes back to the field they belong
     to — the smear accounting that makes "a row/column physically crosses interleaved fields"
     a measurement rather than a claim;
-  - `classify_outcome`'s 6-case truth table;
-  - `inject_shape` honours the sampled anchor and round-trips through `faults.restore`;
-  - the driver's sanity gate + a full --smoke stub run (row count, CSV schema, no state leak).
+  - `classify_outcome`'s 5-class truth table (including `detected_wrong`);
+  - `bounds_check_full` — flag/restore/exempt per pointer field, reach of the last element, and
+    chunk-size independence;
+  - `inject_shape` honours the sampled anchor, aligns a row to the buffer, round-trips through
+    `faults.restore`;
+  - the state-leak gate is verified to FAIL on a stray write (it used to be 0 by construction);
+  - the driver's sanity gates + a full --smoke stub run (row count, CSV schema, paired arms).
 """
 
 import csv
@@ -27,6 +31,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from qp import faults
+from qp.bits import flip_bits
 from qp.rabitq import layout
 from qp.rabitq import stub_adapter
 
@@ -57,13 +62,23 @@ def test_stub_geometry_is_what_these_tests_assume(rmap):
     assert layout.element_field_range(rmap, "links", 0)[1] == 132
 
 
-def test_rotation_centroids_is_the_union_of_the_two_global_windows(rmap):
-    wins = e6.stratum_windows(rmap, "rotation_centroids")
-    centroids = next(r for r in rmap["regions"] if r["name"] == "centroids")
+def test_global_strata_are_split_not_merged(rmap):
+    """Spec deviation I3(a): rotation and centroids are separate strata, each its own window."""
     rotation = next(r for r in rmap["regions"] if r["name"] == "rotation")
-    assert wins == [(centroids["byte_start"], centroids["byte_len"]),
-                    (rotation["byte_start"], rotation["byte_len"])]
-    assert [L for _, L in wins] == [8192, 64]          # the 8192:64 byte weighting of the spec
+    centroids = next(r for r in rmap["regions"] if r["name"] == "centroids")
+    assert e6.stratum_windows(rmap, "rotation") == [(rotation["byte_start"], 64)]
+    assert e6.stratum_windows(rmap, "centroids") == [(centroids["byte_start"], 8192)]
+    assert set(e6.GLOBAL_STRATA) == {"rotation", "centroids"}
+    assert "rotation_centroids" not in e6.STRATA
+    assert len(e6.STRATA) == 7
+
+
+def test_splitting_makes_the_rotation_cell_sampleable(rmap):
+    """The reason for the deviation: merged and byte-weighted, rotation is <1% of the draws."""
+    anchors = [e6.sample_anchor(rmap, "rotation", s)["anchor_byte"] for s in range(50)]
+    rot_start, rot_len = e6.stratum_windows(rmap, "rotation")[0]
+    assert all(rot_start <= a < rot_start + rot_len for a in anchors)
+    assert 64 * 64 / (8192 + 64) < 1.0, "merged weighting would give <1 rotation draw in 64 seeds"
 
 
 def test_ids_stratum_is_two_4_byte_windows_per_element(rmap):
@@ -150,12 +165,8 @@ def test_sample_anchor_element_is_none_exactly_for_global_strata(rmap):
 
 
 def test_sample_anchor_is_byte_weighted_across_windows(rmap):
-    """rotation_centroids 8192:64, factors 12:8, ids 4:4 — deterministic seeds, so not flaky."""
+    """factors 12:8, ids 4:4 — deterministic seeds, so pass/fail is fixed, not flaky."""
     n = 2000
-    rot_hits = sum(e6.sample_anchor(rmap, "rotation_centroids", s)["window_index"]
-                   for s in range(n))
-    assert 3 <= rot_hits <= 40, f"rotation share {rot_hits}/{n}, expected ~{n * 64 / 8256:.0f}"
-
     ex_hits = sum(e6.sample_anchor(rmap, "factors", s)["window_index"] for s in range(n))
     assert 0.35 < ex_hits / n < 0.45, f"ex_factors share {ex_hits / n:.3f}, expected ~0.40"
 
@@ -224,9 +235,18 @@ CLEAN = 0.98
     ("tolerated: damage simply too small to matter (arm off)",
      dict(arm="off", recall=0.9755, elements_crc_fail=None, cliff_repaired=None,
           oob_restored=None, crashed=False), "tolerated"),
+    ("detected_wrong: the P3 stripe — 64 elements flagged, recall still gone",
+     dict(arm="on", recall=0.54, elements_crc_fail=64, cliff_repaired=0, oob_restored=0,
+          crashed=False), "detected_wrong"),
+    ("detected_wrong via a bounds restore that did not save the recall",
+     dict(arm="on", recall=0.31, elements_crc_fail=0, cliff_repaired=0, oob_restored=7,
+          crashed=False), "detected_wrong"),
     ("silent_wrong: recall gone, nothing detected",
      dict(arm="off", recall=0.42, elements_crc_fail=None, cliff_repaired=None,
           oob_restored=None, crashed=False), "silent_wrong"),
+    ("silent_wrong on arm on too: recall gone and every detector stayed quiet",
+     dict(arm="on", recall=0.42, elements_crc_fail=0, cliff_repaired=0, oob_restored=0,
+          crashed=False), "silent_wrong"),
 ])
 def test_classify_outcome_truth_table(name, kw, expected):
     assert e6.classify_outcome(clean_recall=CLEAN, **kw) == expected, name
@@ -244,9 +264,17 @@ def test_repaired_requires_clean_crc():
                                cliff_repaired=9, oob_restored=0, crashed=False) == "tolerated"
 
 
-def test_arm_off_can_never_be_repaired():
+def test_arm_off_can_never_be_repaired_or_detected_wrong():
     assert e6.classify_outcome(arm="off", recall=0.98, clean_recall=CLEAN, elements_crc_fail=0,
                                cliff_repaired=99, oob_restored=99, crashed=False) == "tolerated"
+    # arm off has no detector at all, so a collapse there is silent by definition
+    assert e6.classify_outcome(arm="off", recall=0.1, clean_recall=CLEAN, elements_crc_fail=99,
+                               cliff_repaired=99, oob_restored=99,
+                               crashed=False) == "silent_wrong"
+
+
+def test_all_five_outcome_classes_are_reachable_and_declared():
+    assert set(e6.OUTCOMES) == {"crash", "repaired", "tolerated", "detected_wrong", "silent_wrong"}
 
 
 def test_silent_wrong_needs_both_bands_missed():
@@ -286,6 +314,21 @@ def test_inject_shape_honours_the_anchor_and_restores(rmap, clean_buf, shape):
     assert np.array_equal(buf, clean_buf), "restore must round-trip byte-for-byte"
 
 
+def test_device_row_block_is_aligned_to_the_buffer_not_the_region(rmap, clean_buf):
+    """The row is a physical DRAM block: its start is row_bytes-aligned to the BUFFER origin."""
+    buf = clean_buf.copy()
+    for seed in range(8):
+        anchor = e6.sample_anchor(rmap, "ex_code", seed)["anchor_byte"]
+        positions, record = e6.inject_shape(buf, "device_row", anchor, seed=seed,
+                                            **e6.shape_kwargs("device_row", e6.FULL))
+        rb = record["row_bytes"]
+        assert record["coverage"][0] == (anchor // rb) * rb
+        assert record["coverage"][0] % rb == 0
+        assert record["coverage"][1] == min(record["coverage"][0] + rb, buf.size)
+        faults.restore(buf, positions)
+    assert np.array_equal(buf, clean_buf)
+
+
 def test_device_column_stripe_passes_through_the_anchor_byte(rmap, clean_buf):
     buf = clean_buf.copy()
     anchor = e6.sample_anchor(rmap, "bin_code", 5)["anchor_byte"]
@@ -312,14 +355,92 @@ def test_inject_shape_rejects_an_unknown_shape(clean_buf):
 
 
 # ---------------------------------------------------------------------------
+# bounds_check_full — E6's full-index replacement for E5's 16-element sample
+# ---------------------------------------------------------------------------
+
+def _write_u32(buf, off, val):
+    buf[off:off + 4] = np.frombuffer(int(val).to_bytes(4, "little"), dtype=np.uint8)
+
+
+def test_bounds_check_is_a_no_op_on_a_clean_index(rmap, clean_buf):
+    work = clean_buf.copy()
+    restored, detail = e6.bounds_check_full(work, clean_buf, rmap)
+    assert (restored, detail) == (0, {})
+    assert np.array_equal(work, clean_buf)
+
+
+@pytest.mark.parametrize("field,offset_in_field,bad_value", [
+    ("links", 0, 10 ** 6),          # neighbour COUNT > maxM0 (E5's sampled check misses this)
+    ("links", 4, 10 ** 6),          # first neighbour id >= cur_element_count
+    ("cluster_id", 0, 9999),        # >= num_cluster
+    ("label", 0, 10 ** 6),          # >= cur_element_count
+])
+def test_bounds_check_flags_and_restores_each_pointer_field(rmap, clean_buf, field,
+                                                            offset_in_field, bad_value):
+    work = clean_buf.copy()
+    start, length = layout.element_field_range(rmap, field, 40)
+    _write_u32(work, start + offset_in_field, bad_value)
+    restored, detail = e6.bounds_check_full(work, clean_buf, rmap)
+    assert restored == 1 and detail == {field: 1}
+    assert np.array_equal(work, clean_buf), "the flagged field must be restored from clean"
+
+
+def test_bounds_check_exempts_the_empty_slot_sentinel(rmap, clean_buf):
+    """0xFFFFFFFF is an explicitly-empty neighbour slot, exactly as E5 treats it."""
+    work = clean_buf.copy()
+    start, _ = layout.element_field_range(rmap, "links", 7)
+    _write_u32(work, start + 4, e6.PTR_SENTINEL)
+    restored, _ = e6.bounds_check_full(work, clean_buf, rmap)
+    assert restored == 0
+    assert not np.array_equal(work, clean_buf), "an exempt value must be left in place"
+
+
+def test_bounds_check_reaches_the_last_element(rmap, clean_buf):
+    """The whole point of replacing the 16-element sample: element n-1 must be seen."""
+    n = rmap["header"]["cur_element_count"]
+    work = clean_buf.copy()
+    start, _ = layout.element_field_range(rmap, "label", n - 1)
+    _write_u32(work, start, 10 ** 6)
+    restored, detail = e6.bounds_check_full(work, clean_buf, rmap)
+    assert restored == 1 and detail == {"label": 1}
+
+
+def test_bounds_check_survives_a_chunk_smaller_than_the_index(rmap, clean_buf, monkeypatch):
+    """Chunking is a memory bound, not a semantic one: results must not depend on chunk size."""
+    work = clean_buf.copy()
+    for e in (0, 5, 33, 63):
+        start, _ = layout.element_field_range(rmap, "cluster_id", e)
+        _write_u32(work, start, 9999)
+    monkeypatch.setattr(e6, "BOUNDS_CHUNK_ELEMENTS", 7)
+    restored, detail = e6.bounds_check_full(work, clean_buf, rmap)
+    assert restored == 4 and detail == {"cluster_id": 4}
+    assert np.array_equal(work, clean_buf)
+
+
+def test_bounds_check_counts_multiple_fields_of_one_element_separately(rmap, clean_buf):
+    work = clean_buf.copy()
+    for field in ("cluster_id", "label"):
+        start, _ = layout.element_field_range(rmap, field, 12)
+        _write_u32(work, start, 10 ** 6 if field == "label" else 9999)
+    restored, detail = e6.bounds_check_full(work, clean_buf, rmap)
+    assert restored == 2 and detail == {"cluster_id": 1, "label": 1}
+
+
+# ---------------------------------------------------------------------------
 # driver: sanity gate + full --smoke stub run
 # ---------------------------------------------------------------------------
 
 def test_sanity_gate_refuses_to_let_the_stub_write_under_artifacts():
+    real_out = os.path.join(_ROOT, "artifacts", "phase3", "e6")
+    smoke_out = os.path.join(_ROOT, "artifacts_smoke", "phase3", "e6")
     with pytest.raises(RuntimeError, match="artifacts"):
-        e6.assert_stub_sandbox("stub", os.path.join(_ROOT, "artifacts", "phase3", "e6"))
-    e6.assert_stub_sandbox("stub", os.path.join(_ROOT, "artifacts_smoke", "phase3", "e6"))
-    e6.assert_stub_sandbox("real", os.path.join(_ROOT, "artifacts", "phase3", "e6"))
+        e6.assert_stub_sandbox("stub", real_out)
+    e6.assert_stub_sandbox("stub", smoke_out)
+    e6.assert_stub_sandbox("real", real_out)
+    # the summary's sanity flag is DERIVED from this predicate, never hardcoded
+    assert e6.stub_sandbox_ok("stub", real_out) is False
+    assert e6.stub_sandbox_ok("stub", smoke_out) is True
+    assert e6.stub_sandbox_ok("real", real_out) is True
 
 
 def test_row_count_gate_is_enforced():
@@ -327,10 +448,64 @@ def test_row_count_gate_is_enforced():
         e6.assert_row_count([{"x": 1}], seeds=30)
 
 
+# ---------------------------------------------------------------------------
+# the state-leak gate must be able to FAIL (review I1)
+# ---------------------------------------------------------------------------
+
+def test_verify_and_restore_catches_a_write_outside_the_fault_footprint(clean_buf):
+    work = clean_buf.copy()
+    positions = [(100, 0), (101, 3)]
+    flip_bits(work, positions)
+    work[5000] ^= np.uint8(0x40)                       # a stray write nobody accounted for
+    with pytest.raises(RuntimeError, match="outside"):
+        e6._verify_and_restore(work, clean_buf, positions, "off")
+
+
+def test_verify_and_restore_catches_it_on_the_arm_that_copies_clean_back(clean_buf):
+    """arm on restores wholesale, so a post-restore check would see nothing — this one is pre."""
+    work = clean_buf.copy()
+    positions = [(300, 1)]
+    flip_bits(work, positions)
+    work[9000] ^= np.uint8(0x01)
+    with pytest.raises(RuntimeError, match="outside"):
+        e6._verify_and_restore(work, clean_buf, positions, "on")
+
+
+def test_verify_and_restore_catches_positions_that_did_not_actually_flip(clean_buf):
+    work = clean_buf.copy()
+    with pytest.raises(RuntimeError, match="bookkeeping"):
+        e6._verify_and_restore(work, clean_buf, [(700, 2)], "off")
+
+
+def test_verify_and_restore_accepts_a_guard_style_partial_repair(clean_buf):
+    """arm on legitimately ends with FEWER differing bytes than it touched (a layer repaired)."""
+    work = clean_buf.copy()
+    positions = [(400, 0), (401, 0), (402, 0)]
+    flip_bits(work, positions)
+    work[401] = clean_buf[401]                         # as if a recovery layer put it back
+    assert e6._verify_and_restore(work, clean_buf, positions, "on") == 2
+    assert np.array_equal(work, clean_buf)
+
+
 def _smoke_args(out):
     return types.SimpleNamespace(adapter="stub", smoke=True, resume=False, seeds=None,
                                  seed=1234, ef=None, timeout=60.0, out=out, out_tag=None,
-                                 weights=None, p3=False, p3_seeds=None)
+                                 weights=None, p3=False, p3_seeds=None, row_bytes=None,
+                                 n_rows=None, p_in_row=None)
+
+
+def test_smoke_run_state_leak_gate_actually_fires(tmp_path, monkeypatch):
+    """The gate this replaces reported 'leak 0' with a stray byte injected (review I1)."""
+    real_inject = e6.inject_shape
+
+    def scribbling_inject(buf, shape, anchor_byte, seed, **kwargs):
+        positions, record = real_inject(buf, shape, anchor_byte, seed, **kwargs)
+        buf[7] ^= np.uint8(0x80)                       # outside `positions`, so unaccounted for
+        return positions, record
+
+    monkeypatch.setattr(e6, "inject_shape", scribbling_inject)
+    with pytest.raises(RuntimeError, match="outside"):
+        e6.run(_smoke_args(str(tmp_path)))
 
 
 @pytest.fixture(scope="module")
@@ -359,17 +534,27 @@ def test_smoke_summary_has_provenance_and_per_cell_stats(smoke_run):
     assert blob["meta"]["adapter_type"] == "stub"
     assert blob["meta"]["platform_confirmed_real"] is False
     assert len(blob["cells"]) == len(e6.SHAPES) * len(e6.STRATA) * 2
-    cell = blob["cells"][f"single_cell|ex_code|off"]
+    cell = blob["cells"]["single_cell|ex_code|off"]
     assert cell["n"] == 2
     assert set(cell["outcomes"]) <= set(e6.OUTCOMES)
     assert blob["sanity"]["row_count_ok"] is True
+    assert blob["sanity"]["stub_sandbox_ok"] is True
     assert blob["sanity"]["state_leak_bytes"] == 0
+    assert blob["sanity"]["final_research_drift"] == 0.0
+    assert blob["sanity"]["per_eval_footprint_gate_evals"] == blob["sanity"]["rows"]
+    # both clean baselines must be recorded, not just computed and dropped (review I2)
+    both = blob["meta"]["clean_baseline_both_paths"]
+    assert both["abs_diff"] <= e6.RETENTION_TOL
+    assert both["query_with_recovery_recall@10"] is not None
+    assert "strata_split" in blob["meta"]["spec_deviations"]
+    assert "bounds_check" in blob["meta"]["spec_deviations"]
 
 
 def test_smoke_run_leaves_no_state_leak(smoke_run):
-    """The buffer the driver corrupted must end byte-identical to the clean index."""
+    """Byte-identical AND still answers queries identically (the two independent gates)."""
     out, summary = smoke_run
     assert summary["sanity"]["state_leak_bytes"] == 0
+    assert summary["sanity"]["final_research_drift"] == 0.0
 
 
 def test_smoke_raw_records_carry_the_smear_accounting(smoke_run):
@@ -386,6 +571,41 @@ def test_smoke_raw_records_carry_the_smear_accounting(smoke_run):
     cols = [r for r in recs if r["shape"] == "device_column"]
     assert cols and all(r["coverage_span_bytes"] > 10 * r["coverage_bytes"] for r in cols)
     assert all(r["coverage_bytes"] == sum(r["field_hits"].values()) for r in recs)
+    # the two smear denominators are distinct and ordered: element-field <= field <= touched
+    assert all(r["bytes_in_anchor_element_field"] <= r["bytes_in_anchor_field"] <=
+               r["coverage_bytes"] for r in recs)
+    assert any(r["bytes_in_anchor_element_field"] < r["bytes_in_anchor_field"] for r in rows), \
+        "a row leaves the anchor element but stays partly in the same KIND of field"
+
+
+def test_smoke_arms_are_paired_on_the_same_physical_fault(smoke_run):
+    """off/on must be the SAME injection measured twice, or their delta is not a comparison."""
+    out, _ = smoke_run
+    with open(os.path.join(out, "raw", "e6.records.jsonl")) as fh:
+        recs = [json.loads(line) for line in fh]
+    by_cell = {}
+    for r in recs:
+        by_cell.setdefault((r["shape"], r["region"], r["seed_index"]), {})[r["arm"]] = r
+    assert len(by_cell) == len(e6.SHAPES) * len(e6.STRATA) * 2
+    for key, pair in by_cell.items():
+        assert set(pair) == {"off", "on"}, key
+        off, on = pair["off"], pair["on"]
+        assert off["seed"] == on["seed"], key           # same injector lane seed
+        assert off["anchor_byte"] == on["anchor_byte"], key
+        assert off["element"] == on["element"], key
+        assert off["bits_flipped"] == on["bits_flipped"], key
+        assert off["coverage_bytes"] == on["coverage_bytes"], key
+
+
+def test_smoke_arm_on_supersedes_the_guards_sampled_bounds_check(smoke_run):
+    """bounds_check_full runs first, so the guard's own sampled check must find nothing left."""
+    out, _ = smoke_run
+    with open(os.path.join(out, "raw", "e6.records.jsonl")) as fh:
+        recs = [json.loads(line) for line in fh]
+    on_rows = [r for r in recs if r["arm"] == "on"]
+    assert on_rows and all(r["guard_oob_elements"] == 0 for r in on_rows)
+    assert all(r["oob_restored"] is not None for r in on_rows)
+    assert all(r["oob_restored"] is None for r in recs if r["arm"] == "off")
 
 
 def test_p3_comparison_runs_on_stub(tmp_path):

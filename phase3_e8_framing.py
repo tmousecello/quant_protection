@@ -91,6 +91,10 @@ OUTCOMES = ("crash", "nan_inf", "silent_collapse", "silent_degraded", "benign")
 FULL = {"seeds": 30, "ef": 64}          # 30 = the study's per-cell replicate convention
 SMOKE = {"seeds": 2, "ef": 64}
 
+# The index's reference recall plateau (adapter.EXPECTED_CLEAN_RECALL10 ~= 0.983 is quoted there).
+# Measured once per run purely to confirm the platform/index, never used as a sweep baseline.
+PLATEAU_EF = 2000
+
 # Recall within DELTA_TOL of clean counts as benign (the phase1/E1 "harmful" bar). Collapse uses
 # qp.metrics.is_silent_collapse (retention < config.COLLAPSE_RETENTION_FRAC), the study-wide rule.
 DELTA_TOL = 0.01
@@ -342,10 +346,33 @@ def setup_context(args, cfg):
         raise RuntimeError(f"REPORT-AND-STOP: clean recall@10 is {clean_recall} — the baseline "
                            f"search is broken, so every delta below would be meaningless.")
 
+    # provenance's platform triangulation compares clean recall against the index's PLATEAU anchor
+    # (~0.983). The sweep runs at ef=64 (~0.950) on purpose, which is off that anchor, so feeding
+    # it the sweep's number would report platform_confirmed_real=False for a run that is entirely
+    # real. Measure the plateau once and confirm against THAT; the sweep's operating point is
+    # recorded separately so the two are never conflated.
+    plateau = None
+    if not args.skip_plateau_check:
+        t0 = time.perf_counter()
+        plateau_res = adapter.search_corrupted(tmp, k=config.K, ef=PLATEAU_EF,
+                                               out_path=tmp + ".plateau.ivecs",
+                                               timeout=args.timeout)
+        plateau = {"ef": PLATEAU_EF,
+                   "recall@10": float(metrics.recall_at_k(plateau_res["ids"], gt, config.K)),
+                   "wall_s": round(time.perf_counter() - t0, 3)}
+        log(f"[e8] plateau check: ef={PLATEAU_EF} clean@10={plateau['recall@10']:.6f} "
+            f"(anchor {getattr(adapter, 'EXPECTED_CLEAN_RECALL10', None)}) "
+            f"[{plateau['wall_s']:.1f}s]")
+
     meta = provenance.collect_provenance(
-        adapter, aname, {"recall@10": clean_recall}, cfg, args, rmap,
+        adapter, aname, {"recall@10": (plateau or {}).get("recall@10", clean_recall)},
+        cfg, args, rmap,
         index_sha256=provenance.sha256_file(tmp), corrupted_regions=list(STRATA),
         recovery="off")
+    meta["plateau_check"] = plateau
+    meta["sweep_operating_point"] = {"ef": int(cfg["ef"]), "clean_recall@10": clean_recall,
+                                     "note": "the sweep runs here; the plateau above is the "
+                                             "platform/index confirmation anchor"}
     meta["loader_citation"] = {
         "file": "third_party/RaBitQ-Library/include/rabitqlib/index/hnsw/hnsw.hpp",
         "save_link_list_size": "L655-662",
@@ -604,6 +631,10 @@ def main(argv=None):
                          f"so the operating point does not change the finding)")
     ap.add_argument("--timeout", type=float, default=900.0,
                     help="per-search seconds; a hang under corruption records as crash")
+    ap.add_argument("--skip-plateau-check", dest="skip_plateau_check", action="store_true",
+                    help=f"skip the one-off ef={PLATEAU_EF} clean search that confirms the index "
+                         f"sits on its reference plateau (costs ~15 s; without it "
+                         f"platform_confirmed_real cannot be established)")
     ap.add_argument("--out-tag", dest="out_tag", default=None,
                     help="filename suffix so parallel/variant runs never clobber each other")
     ap.add_argument("--out", default=None)

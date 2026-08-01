@@ -1,9 +1,13 @@
-"""Verifications for the three DRAM fault-shape injectors added to qp.faults (spec E0):
+"""Verifications for the DRAM fault-shape injectors added to qp.faults (spec E0):
 
-``single_cell`` / ``device_row`` / ``device_column``. Same contract as test_faults.py — deterministic
-in seed, restore round-trips, loud validation errors — plus a weighted-shape-mix statistical
-validation against the vendor A CIDR distribution (shape_weights.json) and a uniformity check for
-single_cell.
+``single_cell`` / ``device_row`` / ``device_column`` / ``random_shape``. Same contract as
+test_faults.py — deterministic in seed, restore round-trips, loud validation errors — plus a
+weighted-shape-mix statistical validation of the ``random_shape`` DISPATCHER against the
+vendor A CIDR distribution (shape_weights.json) and a uniformity check for single_cell.
+
+The dispatcher test exercises qp.faults.random_shape itself (not just numpy's rng.choice
+against the same weights it's being checked against) — it would fail if shape_weights.json
+were corrupted, or if random_shape's own weighting logic were wrong.
 
 Deliberately scipy-free (unlike test_faults.py, which already depends on scipy): a hand-rolled
 chi-square helper (mirroring the one in test_faults.py) keeps this file runnable via
@@ -11,18 +15,18 @@ chi-square helper (mirroring the one in test_faults.py) keeps this file runnable
 """
 import json
 import math
-import os
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from qp import faults
 
-SHAPE_WEIGHTS_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..", "..", "..", "..", "..",
-    "results", "jonathan-vuln-shapes", "shape_weights.json",
+SHAPE_WEIGHTS_PATH = (
+    Path(__file__).resolve().parents[5]
+    / "results" / "jonathan-vuln-shapes" / "shape_weights.json"
 )
+_HAVE_SHAPE_WEIGHTS = SHAPE_WEIGHTS_PATH.exists()
 
 
 def _buf(n=1 << 16):  # 64 KiB
@@ -106,6 +110,16 @@ def test_records_json_serializable():
         json.dumps(rec)  # raises TypeError on any leftover numpy scalar
 
 
+def test_records_have_bytes_touched():
+    """bytes_touched is an exact distinct-byte count; coverage is a (possibly loose) span."""
+    for fn, kw in [(faults.single_cell, {}), (faults.device_row, {}),
+                   (faults.device_column, {"n_rows": 8})]:
+        pos, rec = fn(_buf(1 << 20), (0, 1 << 20), seed=1, **kw)
+        assert rec["bytes_touched"] == len({b for b, _ in pos})
+        lo, hi = rec["coverage"]
+        assert rec["bytes_touched"] <= hi - lo         # exact count never exceeds the span
+
+
 def test_shape_validation_errors():
     buf = _buf()
     with pytest.raises(ValueError):
@@ -120,24 +134,73 @@ def test_shape_validation_errors():
         faults.device_column(buf, (0, 40), seed=1, row_bytes=-1)
 
 
+# --- random_shape dispatcher --------------------------------------------------
+
+_TOY_WEIGHTS = {"single_cell": 78.12, "device_row": 9.67, "device_column": 12.21}
+
+
+def test_random_shape_returns_matching_injector_output():
+    buf = _buf(1 << 20); region = (0, 1 << 20)
+    shape_name, pos, rec = faults.random_shape(buf, region, seed=2, weights=_TOY_WEIGHTS)
+    assert shape_name == rec["shape"]
+    assert shape_name in _TOY_WEIGHTS
+
+
+def test_random_shape_deterministic():
+    a = faults.random_shape(_buf(1 << 20), (0, 1 << 20), seed=42, weights=_TOY_WEIGHTS)
+    b = faults.random_shape(_buf(1 << 20), (0, 1 << 20), seed=42, weights=_TOY_WEIGHTS)
+    assert a == b
+
+
+def test_random_shape_validation_errors():
+    buf = _buf()
+    with pytest.raises(ValueError):
+        faults.random_shape(buf, (0, 100), seed=1, weights={"single_cell": 1.0})  # missing keys
+    with pytest.raises(ValueError):
+        faults.random_shape(buf, (0, 100), seed=1,
+                             weights={"single_cell": 1.0, "device_row": -1.0, "device_column": 1.0})
+
+
 # --- Step 5: statistical validation (E0 deliverable) --------------------------
 
+@pytest.mark.skipif(not _HAVE_SHAPE_WEIGHTS,
+                     reason="monorepo weights file not present in standalone checkout")
+def test_shape_weights_json_pinned():
+    """Pin the data file's exact vendor A values so a corrupted/rewritten file is caught here,
+    not silently accepted by the downstream chi-square test (which only checks the observed
+    mix is consistent with WHATEVER the file currently says)."""
+    with open(SHAPE_WEIGHTS_PATH) as f:
+        weights = json.load(f)["vendorA"]
+    assert weights == {"single_cell": 78.12, "device_row": 9.67, "device_column": 12.21}
+
+
+@pytest.mark.skipif(not _HAVE_SHAPE_WEIGHTS,
+                     reason="monorepo weights file not present in standalone checkout")
 def test_shape_mix_matches_vendor_a_weights():
-    """10,000 weighted shape draws should reproduce the vendor A CIDR distribution."""
+    """10,000 faults.random_shape draws should reproduce the vendor A CIDR distribution.
+
+    Exercises the actual dispatcher (not a bare re-implementation of weighted sampling) so a
+    bug in random_shape's own weighting logic, or a corrupted shape_weights.json, would show up
+    here — see test_shape_weights_json_pinned for the latter, pinned separately.
+    """
     with open(SHAPE_WEIGHTS_PATH) as f:
         weights = json.load(f)["vendorA"]
     shapes = ["single_cell", "device_row", "device_column"]
+    buf = _buf(1 << 16)
+    region = (0, 1 << 16)
+    n = 10000
+    counts = {s: 0 for s in shapes}
+    for seed in range(n):
+        shape_name, _pos, _rec = faults.random_shape(buf, region, seed=seed, weights=weights)
+        counts[shape_name] += 1
+
+    observed = np.array([counts[s] for s in shapes], dtype=float)
     probs = np.array([weights[s] for s in shapes], dtype=float)
     probs = probs / probs.sum()
-
-    rng = np.random.default_rng(8)
-    n = 10000
-    draws = rng.choice(shapes, size=n, p=probs)
-    observed = np.array([(draws == s).sum() for s in shapes], dtype=float)
     expected = probs * n
 
     p = _chisquare_pvalue(observed, expected)
-    assert p > 0.01, f"shape mix diverges from vendor A weights (chi2 p={p})"
+    assert p > 0.01, f"dispatcher shape mix diverges from vendor A weights (chi2 p={p}); counts={counts}"
 
 
 def test_single_cell_positions_uniform_ks():

@@ -1,4 +1,4 @@
-"""Fault models — the three memory-error injectors for Phase 3 (and reusable beyond it).
+"""Fault models — the memory-error injectors for Phase 3 (and reusable beyond it).
 
 These sit on top of the pure-numpy bit primitives in qp.bits (so this module imports
 faiss-free) and are the single source of truth for *how* corruption is placed. They are
@@ -6,7 +6,8 @@ deliberately index-agnostic: each operates on a writable uint8 buffer and a ``re
 ``(byte_start, byte_len)`` window, so the same injector drives FAISS indexes (Phase 1/2),
 RaBitQ index files (Phase 3, via qp.rabitq), or any synthetic buffer (the unit tests).
 
-The three models map to distinct hardware error mechanisms (prompt.txt / Stage 0 brief):
+The four model groups map to distinct hardware error mechanisms (prompt.txt / Stage 0 brief;
+group 4 is the CIDR submission's spec §B DRAM fault-shape taxonomy):
 
 1. ``uniform_p``        — spatially-uncorrelated SEU / retention failure: each bit in the
                           region flips iid with probability ``p`` (p ∈ 1e-6 … 1e-3).
@@ -16,10 +17,31 @@ The three models map to distinct hardware error mechanisms (prompt.txt / Stage 0
 3. ``temporal_burst``   — aging / thermal hotspots: a quiet span then a burst of flips at a
                           trigger; ``CumulativeCorruption`` accumulates bursts across ticks
                           for the Stage-1 scrub-interval study.
+4. ``single_cell``      — independent single-bit failure (vendor A: ~78% of reported errors,
+   ``device_row``       — a whole physical DRAM row fails at once (~9.7%), and
+   ``device_column``    — a single bit lane fails down a physical column across many rows
+                          (~12.2%). ``random_shape`` draws one of the three, weighted by a
+                          vendor-reported mix (see ``shape_weights.json`` in
+                          results/jonathan-vuln-shapes/).
 
-Every injector is deterministic in ``seed``, returns the exact list of flipped
-``(byte, bit)`` positions, and is undone byte-for-byte by ``restore`` (re-XOR). That makes
-inject → restore round-trips identity, which the verifications assert.
+   MODELING CAVEAT for ``device_row``/``device_column``: the 8192-byte "row" (``row_bytes``
+   default) is OUR modeling unit, chosen so a row is large relative to a RaBitQ element (272 B)
+   without being unwieldy — it is NOT a datasheet row size. Real DRAM row (page) sizes vary by
+   device/config (typically 1-16 KiB of *cells*, a different granularity than the
+   serialized-index byte layout these injectors operate on to begin with). Getting the true
+   row/column geometry right would require device-level characterization this project does not
+   have — see DRAMScope (Nam et al., ISCA 2024) and X-ray (IEEE CAL 2023). Treat ``row_bytes``
+   as a sensitivity-study knob, not a hardware fact.
+
+Every injector is deterministic in ``seed`` and is undone byte-for-byte by ``restore``
+(re-XOR), making inject → restore round-trips identity, which the verifications assert. Two
+return conventions coexist:
+
+- Groups 1-3 return just the flipped ``(byte, bit)`` positions.
+- Group 4's shape injectors (``single_cell``, ``device_row``, ``device_column``) return
+  ``(positions, record)``, where ``record`` is a JSON-serializable dict describing the shape
+  name, anchor byte, coverage span, and per-shape parameters (see each function's docstring
+  for its exact keys). ``random_shape`` returns ``(shape_name, positions, record)``.
 """
 import numpy as np
 
@@ -137,22 +159,17 @@ def cross_row(buf, region, stride, seed):
 
 # --- DRAM fault shapes (CIDR spec §B: single_cell / device_row / device_column) ---
 #
-# These three shapes are the hardware-fault-mode taxonomy from the CIDR submission's §B
-# (DDR4 corrigendum, arXiv:2408.15302 Table I): most real DRAM errors are single-bit
-# (single_cell), a minority hit an entire physical row (device_row — e.g. a failed row
-# decoder / retention-weak row), and a smaller minority hit one bit lane down a physical
-# column across many rows (device_column — e.g. a bad I/O gate or TSV in 3D-stacked DRAM).
-# `shape_weights.json` (results/jonathan-vuln-shapes/) gives the vendor-reported mix used to
-# weight draws across the three.
+# See the module docstring (group 4) for the taxonomy overview, the row/column modeling
+# caveat, and the shape/record return convention. Each function below repeats a one-line
+# version of the caveat so it shows up in help(fn) too.
 #
-# IMPORTANT MODELING CAVEAT: the 8192-byte "row" used below is OUR modeling unit, chosen so
-# a row is large relative to a RaBitQ element (272 B) without being unwieldy — it is NOT a
-# datasheet row size. Real DRAM row (page) sizes vary by device/config (typically 1-16 KiB
-# of *cells*, which is a different granularity than the serialized-index byte layout these
-# injectors operate on to begin with). Getting the true row/column geometry right would
-# require device-level characterization (DRAMScope, Nam et al., ISCA 2024; X-ray, IEEE CAL
-# 2023) that this project does not have. Treat `row_bytes` as a sensitivity-study knob, not a
-# hardware fact.
+# Record convention shared by all three: `record["coverage"]` is a bounding SPAN of bytes the
+# shape could plausibly have touched — it is exact (dense) for single_cell and device_row's
+# clamped block, but a gross overstatement for device_column (its coverage spans the full
+# blocks the stripe runs through, e.g. 512 * 8192 B, even though only 1 byte per block is
+# actually flipped). `record["bytes_touched"]` is the exact count of distinct bytes with >=1
+# flipped bit (derived from `positions`, the ground truth) — use that, not `coverage`, when
+# exact touched-byte accounting matters.
 
 
 def single_cell(buf, region, seed):
@@ -162,6 +179,7 @@ def single_cell(buf, region, seed):
     a single bit-cell fails independently of its neighbors. Delegates straight to
     ``_bit_to_pos`` — this is ``uniform_p`` with a fixed count of 1. Returns
     ``(positions, record)``; deterministic in ``seed``; ``restore(buf, positions)`` round-trips.
+    ``record["coverage"]`` is exact here (a single byte) and equals ``bytes_touched``.
     """
     byte_start, n_bits = _region_bounds(region)
     rng = np.random.default_rng(seed)
@@ -175,6 +193,7 @@ def single_cell(buf, region, seed):
         "anchor_byte": int(byte),
         "coverage": [int(byte), int(byte) + 1],
         "bits_flipped": 1,
+        "bytes_touched": 1,
     }
     return positions, record
 
@@ -193,10 +212,15 @@ def device_row(buf, region, seed, *, row_bytes=8192, p_in_row=0.5):
     ``record["bits_flipped"]`` is drawn from ``Binomial((hi-lo)*8, p_in_row)`` via the same
     count-then-choice memory-safe pattern as ``uniform_p`` (draw the flip COUNT, then sample
     that many distinct bit offsets, instead of materializing one float per row bit).
+    ``record["coverage"]`` is a byte SPAN (``hi-lo`` bytes), not an exact touched-byte count —
+    at ``p_in_row < 1`` some bytes in the span have zero of their 8 bits flipped, so the exact
+    count is ``record["bytes_touched"]`` (derived from ``positions``); the two only coincide at
+    ``p_in_row`` close to 1.
 
-    NOTE on ``row_bytes=8192``: this is our modeling unit, not a datasheet row size — see the
-    module-level caveat above (DRAMScope / X-ray citations) for why true device geometry is out
-    of scope here.
+    CAVEAT: ``row_bytes=8192`` (default) is our modeling unit, not a datasheet DRAM row size —
+    true device row/column geometry needs hardware characterization this project doesn't have
+    (DRAMScope, Nam et al., ISCA 2024; X-ray, IEEE CAL 2023). See the module docstring's group-4
+    note for the full caveat.
     """
     byte_start, n_bits = _region_bounds(region)
     byte_len = n_bits // 8
@@ -218,6 +242,7 @@ def device_row(buf, region, seed, *, row_bytes=8192, p_in_row=0.5):
         "anchor_byte": int(anchor_byte),
         "coverage": [int(lo), int(hi)],
         "bits_flipped": count,
+        "bytes_touched": len({b for b, _ in positions}),
         "row_bytes": int(row_bytes),
         "p_in_row": float(p_in_row),
     }
@@ -239,9 +264,16 @@ def device_column(buf, region, seed, *, row_bytes=8192, n_rows=512):
     is not a multiple of RaBitQ's 272 B/element stride, the stripe precesses across different
     per-element fields row to row rather than always hitting e.g. the same code byte — so
     ``positions`` records every hit's absolute ``(byte, bit)``, not just the pattern.
+    ``record["coverage"]`` is a bounding SPAN across all ``n_rows`` blocks (``n_rows *
+    row_bytes`` bytes, clamped) — a gross overstatement of what's actually touched, since only
+    one byte per block is flipped. ``record["bytes_touched"]`` (== ``len(positions)`` here,
+    since each row hits a distinct byte) is the exact count; use it, not ``coverage``, for
+    touched-byte accounting.
 
-    NOTE: ``row_bytes=8192`` is our modeling unit, not a datasheet row size — see the
-    module-level caveat above (DRAMScope / X-ray citations).
+    CAVEAT: ``row_bytes=8192`` (default) is our modeling unit, not a datasheet DRAM row size —
+    true device row/column geometry needs hardware characterization this project doesn't have
+    (DRAMScope, Nam et al., ISCA 2024; X-ray, IEEE CAL 2023). See the module docstring's group-4
+    note for the full caveat.
     """
     byte_start, n_bits = _region_bounds(region)
     byte_len = n_bits // 8
@@ -273,12 +305,49 @@ def device_column(buf, region, seed, *, row_bytes=8192, n_rows=512):
         "anchor_byte": int(anchor_byte),
         "coverage": [int(first_row_start), int(coverage_hi)],
         "bits_flipped": len(positions),
+        "bytes_touched": len({b for b, _ in positions}),
         "row_bytes": int(row_bytes),
         "col_offset": int(col_offset),
         "col_bit": int(col_bit),
         "n_rows": int(n_rows),
     }
     return positions, record
+
+
+def random_shape(buf, region, seed, weights, **shape_kwargs):
+    """Draw one of the three DRAM fault shapes at random, weighted by ``weights``.
+
+    ``weights`` is a dict mapping each of ``"single_cell"``/``"device_row"``/``"device_column"``
+    to a relative weight (e.g. the vendor mix loaded from ``shape_weights.json`` —
+    ``{"single_cell": 78.12, "device_row": 9.67, "device_column": 12.21}``); weights are
+    normalized internally, so raw percentages or any positive numbers work. Must cover exactly
+    those three keys.
+
+    Draws a shape name from ``np.random.default_rng(seed).choice(shapes, p=normalized_weights)``,
+    then calls the corresponding injector (``single_cell``, ``device_row``, or
+    ``device_column``) with ``buf``, ``region``, the same ``seed``, forwarding ``**shape_kwargs``
+    (e.g. ``row_bytes``/``p_in_row``/``n_rows``; ignored for ``single_cell``, which takes none).
+    Returns ``(shape_name, positions, record)``. Deterministic in ``seed``: the shape-selection
+    draw and the chosen injector's own draws are two independent ``default_rng(seed)`` streams
+    (one per call site), so reusing the same seed value for both doesn't correlate them — the
+    same ``seed`` always reproduces the same ``(shape_name, positions, record)``.
+    """
+    shapes = ("single_cell", "device_row", "device_column")
+    if set(weights) != set(shapes):
+        raise ValueError(f"weights must cover exactly {shapes}, got {sorted(weights)}")
+    w = np.array([float(weights[s]) for s in shapes])
+    if not np.all(w > 0):
+        raise ValueError(f"weights must all be positive, got {weights!r}")
+    probs = w / w.sum()
+    rng = np.random.default_rng(seed)
+    shape_name = str(rng.choice(shapes, p=probs))
+    injectors = {"single_cell": single_cell, "device_row": device_row, "device_column": device_column}
+    injector = injectors[shape_name]
+    if shape_name == "single_cell":
+        positions, record = injector(buf, region, seed)
+    else:
+        positions, record = injector(buf, region, seed, **shape_kwargs)
+    return shape_name, positions, record
 
 
 # --- model 3: temporally clustered burst flip --------------------------------

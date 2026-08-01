@@ -135,6 +135,152 @@ def cross_row(buf, region, stride, seed):
     return positions
 
 
+# --- DRAM fault shapes (CIDR spec §B: single_cell / device_row / device_column) ---
+#
+# These three shapes are the hardware-fault-mode taxonomy from the CIDR submission's §B
+# (DDR4 corrigendum, arXiv:2408.15302 Table I): most real DRAM errors are single-bit
+# (single_cell), a minority hit an entire physical row (device_row — e.g. a failed row
+# decoder / retention-weak row), and a smaller minority hit one bit lane down a physical
+# column across many rows (device_column — e.g. a bad I/O gate or TSV in 3D-stacked DRAM).
+# `shape_weights.json` (results/jonathan-vuln-shapes/) gives the vendor-reported mix used to
+# weight draws across the three.
+#
+# IMPORTANT MODELING CAVEAT: the 8192-byte "row" used below is OUR modeling unit, chosen so
+# a row is large relative to a RaBitQ element (272 B) without being unwieldy — it is NOT a
+# datasheet row size. Real DRAM row (page) sizes vary by device/config (typically 1-16 KiB
+# of *cells*, which is a different granularity than the serialized-index byte layout these
+# injectors operate on to begin with). Getting the true row/column geometry right would
+# require device-level characterization (DRAMScope, Nam et al., ISCA 2024; X-ray, IEEE CAL
+# 2023) that this project does not have. Treat `row_bytes` as a sensitivity-study knob, not a
+# hardware fact.
+
+
+def single_cell(buf, region, seed):
+    """Flip exactly one uniformly-random bit within ``region`` (the baseline DRAM fault shape).
+
+    The dominant real-world case (vendor A: ~78% of reported errors per shape_weights.json):
+    a single bit-cell fails independently of its neighbors. Delegates straight to
+    ``_bit_to_pos`` — this is ``uniform_p`` with a fixed count of 1. Returns
+    ``(positions, record)``; deterministic in ``seed``; ``restore(buf, positions)`` round-trips.
+    """
+    byte_start, n_bits = _region_bounds(region)
+    rng = np.random.default_rng(seed)
+    bit_offset = int(rng.integers(0, n_bits))
+    pos = _bit_to_pos(byte_start, bit_offset)
+    positions = [pos]
+    flip_bits(buf, positions)
+    byte, _bit = pos
+    record = {
+        "shape": "single_cell",
+        "anchor_byte": int(byte),
+        "coverage": [int(byte), int(byte) + 1],
+        "bits_flipped": 1,
+    }
+    return positions, record
+
+
+def device_row(buf, region, seed, *, row_bytes=8192, p_in_row=0.5):
+    """Fail an entire physical DRAM row: every bit in one ``row_bytes``-aligned block flips iid.
+
+    Models a failed row decoder / retention-weak row (vendor A: ~9.7% of reported errors).
+    The anchor block is the ``row_bytes``-aligned block (aligned to the BUFFER start, not the
+    region) that contains a byte drawn uniformly from ``region``; every bit in that block then
+    flips independently with probability ``p_in_row`` (default 0.5 — a fully-failed row, not a
+    partial one). The block is clamped to ``[0, len(buf))``, so it commonly extends outside
+    ``region`` by design: RaBitQ's level0 fields (links, codes, factors) interleave at 272
+    B/element, so an 8 KB row physically spans roughly 30 elements' worth of unrelated fields.
+    ``record["coverage"]`` reports the actual clamped ``[lo, hi)`` byte range hit, and
+    ``record["bits_flipped"]`` is drawn from ``Binomial((hi-lo)*8, p_in_row)`` via the same
+    count-then-choice memory-safe pattern as ``uniform_p`` (draw the flip COUNT, then sample
+    that many distinct bit offsets, instead of materializing one float per row bit).
+
+    NOTE on ``row_bytes=8192``: this is our modeling unit, not a datasheet row size — see the
+    module-level caveat above (DRAMScope / X-ray citations) for why true device geometry is out
+    of scope here.
+    """
+    byte_start, n_bits = _region_bounds(region)
+    byte_len = n_bits // 8
+    if row_bytes <= 0:
+        raise ValueError(f"row_bytes must be >0, got {row_bytes}")
+    if not (0.0 <= p_in_row <= 1.0):
+        raise ValueError(f"p_in_row must be in [0,1], got {p_in_row}")
+    rng = np.random.default_rng(seed)
+    anchor_byte = byte_start + int(rng.integers(0, byte_len))
+    lo = (anchor_byte // row_bytes) * row_bytes
+    hi = min(lo + row_bytes, len(buf))
+    row_bits = (hi - lo) * 8
+    count = int(rng.binomial(row_bits, p_in_row))
+    bit_offsets = rng.choice(row_bits, size=count, replace=False)
+    positions = [_bit_to_pos(lo, int(b)) for b in bit_offsets]
+    flip_bits(buf, positions)
+    record = {
+        "shape": "device_row",
+        "anchor_byte": int(anchor_byte),
+        "coverage": [int(lo), int(hi)],
+        "bits_flipped": count,
+        "row_bytes": int(row_bytes),
+        "p_in_row": float(p_in_row),
+    }
+    return positions, record
+
+
+def device_column(buf, region, seed, *, row_bytes=8192, n_rows=512):
+    """Fail one bit lane down a physical DRAM column across ``n_rows`` consecutive rows.
+
+    Models a bad I/O gate / TSV fault in 3D-stacked DRAM (vendor A: ~12.2% of reported errors)
+    — the same (byte-offset-in-row, bit) pair fails in every row of a physical column. The
+    first row is the ``row_bytes``-aligned block (aligned to the buffer start) containing a
+    byte drawn uniformly from ``region``. Within that row a ``(col_offset, col_bit)`` pair is
+    then chosen uniformly from the subset of ``[0, row_bytes) x [0, 8)`` whose hit byte
+    (``first_row_start + col_offset``) lies inside ``region`` — this is always non-empty since
+    the anchor byte itself qualifies. That exact ``(col_offset, col_bit)`` is then flipped in
+    ``n_rows`` consecutive ``row_bytes``-aligned blocks starting at the first row, clamped at
+    ``len(buf)`` (a stripe that runs off the end of the buffer is simply shorter). Because 8192
+    is not a multiple of RaBitQ's 272 B/element stride, the stripe precesses across different
+    per-element fields row to row rather than always hitting e.g. the same code byte — so
+    ``positions`` records every hit's absolute ``(byte, bit)``, not just the pattern.
+
+    NOTE: ``row_bytes=8192`` is our modeling unit, not a datasheet row size — see the
+    module-level caveat above (DRAMScope / X-ray citations).
+    """
+    byte_start, n_bits = _region_bounds(region)
+    byte_len = n_bits // 8
+    if row_bytes <= 0:
+        raise ValueError(f"row_bytes must be >0, got {row_bytes}")
+    if n_rows <= 0:
+        raise ValueError(f"n_rows must be >0, got {n_rows}")
+    rng = np.random.default_rng(seed)
+    anchor_byte = byte_start + int(rng.integers(0, byte_len))
+    first_row_start = (anchor_byte // row_bytes) * row_bytes
+    # Valid col_offsets are those whose hit byte in the first row still lies inside `region`;
+    # this range is never empty because anchor_byte - first_row_start is always a member.
+    region_hi = byte_start + byte_len
+    lo_valid = max(0, byte_start - first_row_start)
+    hi_valid = min(row_bytes, region_hi - first_row_start)
+    col_offset = int(rng.integers(lo_valid, hi_valid))
+    col_bit = int(rng.integers(0, 8))
+    positions = []
+    for i in range(int(n_rows)):
+        row_start = first_row_start + i * row_bytes
+        byte_pos = row_start + col_offset
+        if byte_pos >= len(buf):
+            break                                     # stripe clamped at buffer end
+        positions.append((byte_pos, col_bit))
+    flip_bits(buf, positions)
+    coverage_hi = min(first_row_start + int(n_rows) * row_bytes, len(buf))
+    record = {
+        "shape": "device_column",
+        "anchor_byte": int(anchor_byte),
+        "coverage": [int(first_row_start), int(coverage_hi)],
+        "bits_flipped": len(positions),
+        "row_bytes": int(row_bytes),
+        "col_offset": int(col_offset),
+        "col_bit": int(col_bit),
+        "n_rows": int(n_rows),
+    }
+    return positions, record
+
+
 # --- model 3: temporally clustered burst flip --------------------------------
 
 def temporal_burst(buf, region, timeline, seed):

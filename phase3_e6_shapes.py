@@ -448,12 +448,38 @@ def assert_stub_sandbox(aname, out_dir):
             f"or an explicit --out.")
 
 
-def assert_row_count(records, seeds):
-    """The grid must be complete: shapes x strata x seeds x arms, no silently dropped cell."""
-    expected = len(SHAPES) * len(STRATA) * int(seeds) * len(ARMS)
+def csv_list(kind, allowed):
+    """argparse type for a comma-separated subset of `allowed` (the expb --patterns pattern).
+
+    Sharding is by grid slice, so a typo must be a loud error: silently running 6 of 7 strata
+    would leave a hole in the damage matrix that only shows up when the shards are merged.
+    """
+    def parse(s):
+        vals = tuple(x.strip() for x in str(s).split(",") if x.strip())
+        if not vals:
+            raise argparse.ArgumentTypeError(f"empty {kind} list")
+        bad = [v for v in vals if v not in allowed]
+        if bad:
+            raise argparse.ArgumentTypeError(
+                f"unknown {kind}: {bad} (choose from {list(allowed)})")
+        seen = [v for i, v in enumerate(vals) if v in vals[:i]]
+        if seen:
+            raise argparse.ArgumentTypeError(f"duplicate {kind}: {sorted(set(seen))}")
+        # Canonical order, so a shard's rows sort the same way as the full grid's.
+        return tuple(v for v in allowed if v in vals)
+    return parse
+
+
+def assert_row_count(records, seeds, shapes=SHAPES, strata=STRATA):
+    """The (possibly sharded) grid must be complete: no silently dropped cell.
+
+    `shapes`/`strata` are the SLICE this process was asked to run (--shapes / --strata), so a
+    shard is gated against its own expected size rather than the full grid's.
+    """
+    expected = len(shapes) * len(strata) * int(seeds) * len(ARMS)
     assert len(records) == expected, (
         f"row count {len(records)} != expected {expected} "
-        f"({len(SHAPES)} shapes x {len(STRATA)} strata x {seeds} seeds x {len(ARMS)} arms)")
+        f"({len(shapes)} shapes x {len(strata)} strata x {seeds} seeds x {len(ARMS)} arms)")
     return expected
 
 
@@ -734,10 +760,15 @@ def _p95(vals):
     return round(float(np.percentile(vals, 95)), 6) if vals else None
 
 
-def summarize(records):
+def summarize(records, shapes=SHAPES, strata=STRATA):
+    """Per-cell medians/p95 + the smear block, over the SLICE this process ran.
+
+    Iterating the full grid on a shard would mint empty n=0 cells that look like measurements
+    that came back blank rather than work another shard is doing.
+    """
     cells, smear = {}, {}
-    for shape in SHAPES:
-        for stratum in STRATA:
+    for shape in shapes:
+        for stratum in strata:
             grp = [r for r in records if r["shape"] == shape and r["region"] == stratum]
             if grp:
                 touched = [r["coverage_bytes"] for r in grp]
@@ -830,6 +861,13 @@ def run(args):
     if getattr(args, "p_in_row", None) is not None:
         cfg["p_in_row"] = float(args.p_in_row)
 
+    # Grid slice for this process. The C++ search is single-threaded, so a full run is sharded
+    # across cores by shape/stratum; cell seeds are derived from (root, shape, stratum, i) and
+    # never from a loop counter, so a shard reproduces exactly the cells the full grid would.
+    shapes = tuple(getattr(args, "shapes", None) or SHAPES)
+    strata = tuple(getattr(args, "strata", None) or STRATA)
+    sharded = (shapes != SHAPES or strata != STRATA)
+
     ctx = setup_context(args, cfg)
     out, tag = ctx["out"], ctx["tag"]
     raw_path = os.path.join(out, "raw", f"e6{tag}.records.jsonl")
@@ -855,9 +893,13 @@ def run(args):
         scratch = np.empty(work.size, dtype=bool)        # reused by the per-eval leak gate
         records = []
         t0 = time.time()
+        if sharded:
+            log(f"[e6] shard: shapes={list(shapes)} strata={list(strata)} "
+                f"({len(shapes) * len(strata) * int(cfg['seeds']) * len(ARMS)} evals of "
+                f"{len(SHAPES) * len(STRATA) * int(cfg['seeds']) * len(ARMS)})")
         with RawWriter(raw_path, done_path=done_path) as w:
-            for shape in SHAPES:
-                for stratum in STRATA:
+            for shape in shapes:
+                for stratum in strata:
                     tc = time.time()
                     for i in range(int(cfg["seeds"])):
                         seed = cell_seed(args.seed, shape, stratum, i)
@@ -886,12 +928,16 @@ def run(args):
         log(f"[e6] {len(records)} evals in {time.time() - t0:.1f}s "
             f"(leak {leak} bytes, re-search drift {research_drift:.2e})")
 
-    expected = assert_row_count(records, cfg["seeds"])
-    cells, smear = summarize(records)
+    expected = assert_row_count(records, cfg["seeds"], shapes=shapes, strata=strata)
+    cells, smear = summarize(records, shapes=shapes, strata=strata)
     write_csv(os.path.join(out, f"e6_results{tag}.csv"), records)
     summary = {
         "experiment": "e6_shapes",
-        "shapes": list(SHAPES), "strata": list(STRATA), "arms": list(ARMS),
+        "shapes": list(shapes), "strata": list(strata), "arms": list(ARMS),
+        "shard": {"is_shard": sharded, "full_grid_shapes": list(SHAPES),
+                  "full_grid_strata": list(STRATA),
+                  "full_grid_rows": len(SHAPES) * len(STRATA) * int(cfg["seeds"]) * len(ARMS),
+                  "out_tag": getattr(args, "out_tag", None)},
         "seeds": int(cfg["seeds"]), "cfg": cfg,
         "clean_recall@10": ctx["clean_recall"],
         "cells": cells, "smear": smear,
@@ -1059,6 +1105,13 @@ def main(argv=None):
     ap.add_argument("--p3", action="store_true",
                     help="run the P3 burst-vs-stripe comparison instead of the damage matrix")
     ap.add_argument("--seeds", type=int, default=None, help="replicates per (shape, stratum) cell")
+    ap.add_argument("--shapes", type=csv_list("shape", SHAPES), default=None,
+                    help=f"comma-separated subset of {list(SHAPES)} — shards the grid across "
+                         f"processes (the C++ search is single-threaded). Pair with --out-tag.")
+    ap.add_argument("--strata", type=csv_list("stratum", STRATA), default=None,
+                    help=f"comma-separated subset of {list(STRATA)}; same sharding purpose. "
+                         f"Cell seeds are (root, shape, stratum, i)-derived, so a shard's "
+                         f"anchors and flips are identical to the full grid's.")
     ap.add_argument("--p3-seeds", dest="p3_seeds", type=int, default=None)
     ap.add_argument("--seed", type=int, default=config.SEED, help="root seed")
     ap.add_argument("--ef", type=int, default=None)

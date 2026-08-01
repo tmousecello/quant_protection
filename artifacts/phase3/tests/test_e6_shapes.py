@@ -17,6 +17,7 @@ Everything here runs offline against the STUB geometry (arm64-safe, faiss-free).
   - the driver's sanity gates + a full --smoke stub run (row count, CSV schema, paired arms).
 """
 
+import argparse
 import csv
 import json
 import os
@@ -448,6 +449,96 @@ def test_row_count_gate_is_enforced():
         e6.assert_row_count([{"x": 1}], seeds=30)
 
 
+def test_row_count_gate_adapts_to_a_shard():
+    rows = [{"x": 1}] * (1 * 2 * 3 * 2)                # 1 shape x 2 strata x 3 seeds x 2 arms
+    assert e6.assert_row_count(rows, seeds=3, shapes=("device_row",),
+                               strata=("ids", "links")) == 12
+    with pytest.raises(AssertionError, match="row count"):   # would pass against the full grid?
+        e6.assert_row_count(rows, seeds=3, shapes=("device_row",), strata=("ids",))
+
+
+# ---------------------------------------------------------------------------
+# --shapes / --strata shard filters
+# ---------------------------------------------------------------------------
+
+def test_csv_list_validates_against_the_known_sets():
+    parse = e6.csv_list("stratum", e6.STRATA)
+    assert parse("ids,links") == ("links", "ids")       # canonicalised to STRATA order
+    assert parse(" rotation , ids ") == ("rotation", "ids")
+    for bad in ("idz", "ids,rotaton", "", "ids,ids"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse(bad)
+
+
+def test_csv_list_rejects_a_stratum_that_is_only_a_shape_and_vice_versa():
+    with pytest.raises(argparse.ArgumentTypeError, match="unknown stratum"):
+        e6.csv_list("stratum", e6.STRATA)("device_row")
+    with pytest.raises(argparse.ArgumentTypeError, match="unknown shape"):
+        e6.csv_list("shape", e6.SHAPES)("ex_code")
+
+
+def test_cli_parses_the_shard_filters_and_rejects_typos(capsys):
+    # exercise the parser through main()'s argv path: a typo must exit non-zero, not run a
+    # 6-of-7-strata grid that quietly leaves a hole in the merged matrix.
+    with pytest.raises(SystemExit):
+        e6.main(["--adapter", "stub", "--smoke", "--strata", "ids,rotaton"])
+    assert "unknown stratum" in capsys.readouterr().err
+
+
+SHARD_SHAPES, SHARD_STRATA = ("device_column",), ("links", "ids")
+
+
+@pytest.fixture(scope="module")
+def shard_run(tmp_path_factory):
+    out = str(tmp_path_factory.mktemp("e6_shard"))
+    args = _smoke_args(out)
+    args.shapes, args.strata, args.out_tag = SHARD_SHAPES, SHARD_STRATA, "shard0"
+    return out, e6.run(args)
+
+
+def test_shard_runs_only_its_slice(shard_run):
+    out, summary = shard_run
+    with open(os.path.join(out, "e6_results_shard0.csv")) as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == len(SHARD_SHAPES) * len(SHARD_STRATA) * 2 * 2
+    assert {r["shape"] for r in rows} == set(SHARD_SHAPES)
+    assert {r["region"] for r in rows} == set(SHARD_STRATA)
+    assert summary["sanity"]["row_count_ok"] is True
+    assert summary["shard"]["is_shard"] is True
+    assert summary["shard"]["full_grid_rows"] == len(e6.SHAPES) * len(e6.STRATA) * 2 * 2
+    # no empty placeholder cells for slices another shard is running
+    assert len(summary["cells"]) == len(SHARD_SHAPES) * len(SHARD_STRATA) * 2
+    assert all(c["n"] == 2 for c in summary["cells"].values())
+
+
+def test_shard_reproduces_the_full_grid_exactly_for_shared_cells(shard_run, smoke_run):
+    """A sharded run must be a partition of the full grid, not a different experiment.
+
+    Cell seeds come from SeedSequence([root, crc32(shape), crc32(stratum), i]) — never from a
+    loop counter — so the anchor, the injected positions (compared here via field_hits, which is
+    derived from them) and the measured recall must be bit-identical either way.
+    """
+    shard_out, _ = shard_run
+    full_out, _ = smoke_run
+
+    def load(path):
+        with open(path) as fh:
+            return {(r["shape"], r["region"], r["seed_index"], r["arm"]): r
+                    for r in (json.loads(line) for line in fh)}
+
+    shard = load(os.path.join(shard_out, "raw", "e6_shard0.records.jsonl"))
+    full = load(os.path.join(full_out, "raw", "e6.records.jsonl"))
+    shared = set(shard) & set(full)
+    assert len(shared) == len(SHARD_SHAPES) * len(SHARD_STRATA) * 2 * 2, "shard must be a subset"
+    for key in sorted(shared):
+        a, b = shard[key], full[key]
+        for field in ("seed", "element", "anchor_byte", "anchor_window_index", "bits_flipped",
+                      "coverage_bytes", "coverage_lo", "coverage_hi", "field_hits",
+                      "bytes_in_anchor_field", "recall", "delta_recall", "outcome",
+                      "elements_crc_fail", "cliff_repaired", "oob_restored"):
+            assert a[field] == b[field], f"{key} differs on {field}: {a[field]} != {b[field]}"
+
+
 # ---------------------------------------------------------------------------
 # the state-leak gate must be able to FAIL (review I1)
 # ---------------------------------------------------------------------------
@@ -491,7 +582,7 @@ def _smoke_args(out):
     return types.SimpleNamespace(adapter="stub", smoke=True, resume=False, seeds=None,
                                  seed=1234, ef=None, timeout=60.0, out=out, out_tag=None,
                                  weights=None, p3=False, p3_seeds=None, row_bytes=None,
-                                 n_rows=None, p_in_row=None)
+                                 n_rows=None, p_in_row=None, shapes=None, strata=None)
 
 
 def test_smoke_run_state_leak_gate_actually_fires(tmp_path, monkeypatch):

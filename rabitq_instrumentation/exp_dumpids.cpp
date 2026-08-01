@@ -27,9 +27,16 @@
 //              short rows (possible under --recovery drop at high corruption) are padded with
 //              0xFFFFFFFF (-1), which qp.metrics treats as a non-matching id.
 //   stats json (when --stats-json): load-time CRC scan totals + per-query recovery counters
-//              (consults / corrupt_hits / fallbacks / drops).
+//              (consults / corrupt_hits / fallbacks / drops) + the two E7-microbench timers,
+//              load.crc_scan_ns (the eager CRC loop, hnsw.hpp) and search_wall_ns (this file:
+//              the per-query hnsw.search calls only, no IO/recall/JSON). Dividing each by its
+//              own count -- crc_scan_ns/load.elements_checked vs search_wall_ns/
+//              totals.consults -- gives the per-vector CRC cost vs the per-candidate search
+//              cost. The search denominator includes graph traversal, so the resulting ratio
+//              is a LOWER bound on how cheap CRC is against pure distance work.
 // Determinism: same index file + same manifest + same flags -> identical ids (single-thread
 // search, no RNG anywhere on this path).
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -134,9 +141,19 @@ int main(int argc, char* argv[]) {
     uint64_t tot_corrupt = 0;
     uint64_t tot_fallbacks = 0;
     uint64_t tot_drops = 0;
+    // Search-only wall time: the clock brackets the hnsw.search call and nothing else (no
+    // counter reads, no result move, no IO), accumulated over all nq queries. Two
+    // steady_clock reads per query against a ~ms-scale ef=2000 search is noise-level
+    // overhead, and it is identical work on every run -- the dumped ids cannot change.
+    uint64_t search_wall_ns = 0;
     for (size_t q = 0; q < nq; q++) {
         hnsw.fi_reset_query_stats();
+        const auto q_t0 = std::chrono::steady_clock::now();
         auto one = hnsw.search(query.data() + (q * dim), 1, topk, ef, 1);
+        search_wall_ns += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - q_t0)
+                .count());
         res[q] = std::move(one[0]);
         const auto& s = hnsw.fi_qstats_;
         per_query.push_back({s.consults, s.corrupt_hits, s.fallbacks, s.drops});
@@ -190,8 +207,12 @@ int main(int argc, char* argv[]) {
            << "  \"ef\": " << ef << ",\n"
            << "  \"topk\": " << topk << ",\n"
            << "  \"nq\": " << nq << ",\n"
+           // The load.* trio is all zero under --recovery none: no manifest is loaded, so
+           // there is nothing to check and no scan to time.
            << "  \"load\": {\"elements_checked\": " << hnsw.fi_crc_checked_
-           << ", \"elements_crc_fail\": " << hnsw.fi_crc_failed_ << "},\n"
+           << ", \"elements_crc_fail\": " << hnsw.fi_crc_failed_
+           << ", \"crc_scan_ns\": " << hnsw.fi_crc_scan_ns_ << "},\n"
+           << "  \"search_wall_ns\": " << search_wall_ns << ",\n"
            << "  \"totals\": {\"consults\": " << tot_consults
            << ", \"corrupt_hits\": " << tot_corrupt
            << ", \"fallbacks\": " << tot_fallbacks

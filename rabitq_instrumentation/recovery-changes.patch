@@ -1,8 +1,16 @@
 diff --git a/include/rabitqlib/index/hnsw/hnsw.hpp b/include/rabitqlib/index/hnsw/hnsw.hpp
-index 56e9a42..a2234db 100644
+index 56e9a42..88c3d36 100644
 --- a/include/rabitqlib/index/hnsw/hnsw.hpp
 +++ b/include/rabitqlib/index/hnsw/hnsw.hpp
-@@ -95,6 +95,144 @@ class HierarchicalNSW {
+@@ -6,6 +6,7 @@
+ 
+ #include <atomic>
+ #include <cassert>
++#include <chrono>  // quant_protection: load-time CRC scan timing (fi_crc_scan_ns_)
+ #include <cstddef>
+ #include <cstdlib>
+ #include <fstream>
+@@ -95,6 +96,154 @@ class HierarchicalNSW {
      [[nodiscard]] size_t fi_size_links0() const { return size_links_level0_; }
      [[nodiscard]] char* fi_level0() { return data_level0_memory_; }
  
@@ -24,6 +32,11 @@ index 56e9a42..a2234db 100644
 +    bool fi_crc_mode_ = false;
 +    size_t fi_crc_checked_ = 0;  // load-time scan: elements CRC-verified
 +    size_t fi_crc_failed_ = 0;   // load-time scan: elements whose ex bytes mismatched
++    // Wall time of the eager scan LOOP only -- manifest open/header/entry-array read are
++    // excluded, so crc_scan_ns / elements_checked is the per-vector CRC cost the E7
++    // microbench divides by the per-consult distance cost. steady_clock (monotonic, immune
++    // to wall-clock steps); the clock is read TWICE per load, never on the query path.
++    uint64_t fi_crc_scan_ns_ = 0;
 +    struct FiQueryStats {        // per-query recovery counters (single-thread search only;
 +        uint64_t consults = 0;   //   caller resets between queries via fi_reset_query_stats)
 +        uint64_t corrupt_hits = 0;
@@ -125,6 +138,7 @@ index 56e9a42..a2234db 100644
 +        ex_corrupt_.assign(cur_element_count_, 0);
 +        fi_crc_checked_ = 0;
 +        fi_crc_failed_ = 0;
++        const auto scan_t0 = std::chrono::steady_clock::now();
 +        for (uint64_t i = 0; i < n_entries; i++) {
 +            if (entries[i].off != level0_start + i * spe + field_off ||
 +                entries[i].len != field_len) {
@@ -140,6 +154,10 @@ index 56e9a42..a2234db 100644
 +                fi_crc_failed_++;
 +            }
 +        }
++        fi_crc_scan_ns_ = static_cast<uint64_t>(
++            std::chrono::duration_cast<std::chrono::nanoseconds>(
++                std::chrono::steady_clock::now() - scan_t0)
++                .count());
 +        fault_policy_ = policy;
 +        fi_crc_mode_ = true;
 +    }
@@ -147,7 +165,7 @@ index 56e9a42..a2234db 100644
      struct ResultRecord {
          float est_dist;
          float low_dist;
-@@ -1278,8 +1416,14 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
+@@ -1278,8 +1427,14 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
  
              // Fault injection: a CRC-detected ex corruption under FAULT_DROP removes the
              // node entirely (no result, no routing) -- the "detect & skip" baseline.
@@ -164,7 +182,7 @@ index 56e9a42..a2234db 100644
              }
  
              // Bounds-check guard: convert a structurally-invalid id (which would otherwise
-@@ -1313,9 +1457,15 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
+@@ -1313,9 +1468,15 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
                  // Error-bound-aware fallback: rank a corrupted vector by its pessimistic
                  // upper-bound distance (est + (est - low)) so its coarse 1-bit estimate
                  // cannot create a false positive that evicts a true neighbour.

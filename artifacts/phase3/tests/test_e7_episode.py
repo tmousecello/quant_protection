@@ -412,6 +412,12 @@ def test_cost_json_reload_block_is_self_describing_on_its_own():
     assert e7.validate_cost_json(doc) == []
 
 
+GATED_ON_COLD = ("reload.seconds", "reload.gbps",
+                 "reload.downtime_upper_bound_full_batch_s", "eager.downtime_s",
+                 "eager.downtime_upper_bound_full_batch_s", "crash_restart.downtime_s",
+                 "crash_restart.downtime_upper_bound_full_batch_s")
+
+
 def test_cost_json_rejects_a_cold_number_whose_eviction_check_did_not_pass():
     """The I2 gate: an unverified-cold read is page-cache bandwidth and must be sentinelled."""
     for verdict in (False, None):
@@ -422,12 +428,24 @@ def test_cost_json_rejects_a_cold_number_whose_eviction_check_did_not_pass():
         assert any("eager.downtime_s" in p for p in problems)
 
         # ...and the same document is valid once the gated fields are sentinelled.
-        for dotted in ("reload.seconds", "reload.gbps",
-                       "reload.downtime_upper_bound_full_batch_s", "eager.downtime_s",
-                       "eager.downtime_upper_bound_full_batch_s"):
+        for dotted in GATED_ON_COLD:
             b, k = dotted.split(".")
             doc[b][k] = e7.SENTINEL
         assert e7.validate_cost_json(doc) == []
+
+
+@pytest.mark.parametrize("dotted", GATED_ON_COLD)
+def test_cost_json_cold_gate_covers_every_derived_timing_individually(dotted):
+    """Defense in depth: each gated key must be caught ON ITS OWN, so no future edit to
+    run_panel_b can leak a page-cache number past the schema through a key nobody checked."""
+    doc = _good_cost()
+    doc["reload"]["cache_eviction_verified"] = False
+    for other in GATED_ON_COLD:            # sentinel everything else, leave `dotted` numeric
+        if other != dotted:
+            b, k = other.split(".")
+            doc[b][k] = e7.SENTINEL
+    problems = e7.validate_cost_json(doc)
+    assert any(dotted in p for p in problems), f"{dotted} slipped past the cold-cache gate"
 
 
 def test_cost_json_cache_eviction_verified_must_be_tri_state():
@@ -441,6 +459,31 @@ def test_cost_json_io_bytes_must_be_the_real_index_size_not_a_guess():
     doc = _good_cost()
     doc["eager"]["io_bytes"] = 123
     assert any("io_bytes" in p for p in e7.validate_cost_json(doc))
+
+
+# ---------------------------------------------------------------------------
+# Microbench caption — the string that gets pasted into a figure caption
+# ---------------------------------------------------------------------------
+
+def test_ratio_caption_bounds_against_pure_distance_not_against_a_consult():
+    """Against a CONSULT the ratio is exactly what was divided — an equality, not a bound. The
+    'at least' claim is only true against pure distance arithmetic, so the caption must say so."""
+    cap = e7.ratio_interpretation(114.366449, 1955.204565, 0.058493)
+    assert "at least 5.85% of one distance computation" in cap
+    assert "pure distance arithmetic" in cap
+    assert "at least 5.85% of one distance consult" not in cap
+    # ...and the equality against the consult is stated explicitly rather than left implied.
+    assert "is an equality, not a bound" in cap
+
+
+def test_ratio_caption_states_the_cheapness_bound_as_an_upper_bound():
+    cap = e7.ratio_interpretation(114.366449, 1955.204565, 0.058493)
+    assert "AT MOST 17x cheaper" in cap
+    assert "at least 17x" not in cap
+
+
+def test_ratio_caption_is_a_sentinel_when_the_ratio_is():
+    assert e7.ratio_interpretation(e7.SENTINEL, e7.SENTINEL, e7.SENTINEL) == e7.SENTINEL
 
 
 # ---------------------------------------------------------------------------

@@ -397,10 +397,15 @@ def validate_cost_json(doc):
 
     # A cold-cache number that failed (or could not run) its own eviction check must not be
     # sitting in the file as a plain float — that is the exact failure this gate exists for.
+    # crash_restart's two are included as defense in depth: today they can only be numbers when
+    # reload.seconds is one (the arithmetic short-circuits to a sentinel otherwise), so the
+    # schema would never see them — but that is a property of the current production path, not
+    # of the schema, and a future edit to run_panel_b must not be able to leak one past here.
     if doc["reload"].get("cache_eviction_verified") is not True:
         for dotted in ("reload.seconds", "reload.gbps",
                        "reload.downtime_upper_bound_full_batch_s", "eager.downtime_s",
-                       "eager.downtime_upper_bound_full_batch_s"):
+                       "eager.downtime_upper_bound_full_batch_s", "crash_restart.downtime_s",
+                       "crash_restart.downtime_upper_bound_full_batch_s"):
             block, key = dotted.split(".")
             if isinstance(doc[block].get(key), (int, float)) and not isinstance(
                     doc[block].get(key), bool):
@@ -1287,6 +1292,28 @@ def run_panel_b(args, cfg):
 # --microbench — per-vector CRC vs per-vector distance
 # ---------------------------------------------------------------------------
 
+def ratio_interpretation(ns_per_vector, ns_per_consult, ratio):
+    """The paste-ready caption for the CRC-vs-distance ratio. Pure, so the wording is testable.
+
+    THE COMPARAND MATTERS. Against one CONSULT the ratio is an EQUALITY — crc/consult is exactly
+    what was divided, nothing is bounded. The "at least" claim only holds against pure DISTANCE
+    COMPUTATION, because the consult denominator carries graph traversal and therefore overstates
+    it: pure_distance <= consult, so crc/pure_distance >= crc/consult. Saying "at least X% of one
+    consult" would be a bound on a quantity that is not bounded, and would quietly understate the
+    measured value. The caption below therefore states both: the equality against the consult
+    (with the raw numbers) and the one-sided bound against pure distance arithmetic — matching
+    `distance.caveat`.
+    """
+    if ratio == SENTINEL or not isinstance(ratio, (int, float)):
+        return SENTINEL
+    return (f"CRC costs at least {ratio * 100:.2f}% of one distance computation (pure distance "
+            f"arithmetic), i.e. it is AT MOST {1 / ratio:.0f}x cheaper than one. Measured: "
+            f"{ns_per_vector:.1f} ns/vector of CRC against {ns_per_consult:.1f} ns per consult, "
+            f"and {ratio * 100:.2f}% of a CONSULT is an equality, not a bound — the bound "
+            f"appears only against pure distance arithmetic, because the consult denominator "
+            f"also carries graph traversal. See distance.caveat.")
+
+
 def run_microbench(args, cfg):
     """CRC ns/vector vs distance ns/consult, both from the real binary on real data.
 
@@ -1369,12 +1396,7 @@ def run_microbench(args, cfg):
                        "cheaper, not at least."),
         },
         "ratio_crc_per_distance": ratio,
-        "ratio_interpretation": (
-            SENTINEL if ratio == SENTINEL else
-            f"CRC costs at least {ratio * 100:.2f}% of one distance consult "
-            f"({ns_per_vector:.1f} ns/vector vs {ns_per_consult:.1f} ns/consult), i.e. AT MOST "
-            f"{1 / ratio:.0f}x cheaper. The bound is one-sided because the consult denominator "
-            f"includes traversal — see distance.caveat."),
+        "ratio_interpretation": ratio_interpretation(ns_per_vector, ns_per_consult, ratio),
         "measured_today": {
             "subprocess_wall_s": round(wall_s, 6),
             "subprocess_wall_note": ("whole exp_dumpids run: index load + CRC scan + the full "

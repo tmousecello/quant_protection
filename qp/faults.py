@@ -23,6 +23,12 @@ group 4 is the CIDR submission's spec §B DRAM fault-shape taxonomy):
                           (~12.2%). ``random_shape`` draws one of the three, weighted by a
                           vendor-reported mix (see ``shape_weights.json`` in
                           results/jonathan-vuln-shapes/).
+   ``miscorrection_word`` — E9's addition, and a different kind of animal: not a geometry but a
+                          CODE failure. DDR5 on-die SEC ECC miscorrects a 2-bit raw fault into 3
+                          observed wrong bits, all inside one ~16 B ECC word (A-003, X-003). A
+                          localized multi-bit burst, not a row or a stripe. Not part of
+                          ``random_shape``'s vendor mix — the mix is a fault-geometry census,
+                          while miscorrection is what the ECC does to a geometry after the fact.
 
    MODELING CAVEAT for ``device_row``/``device_column``: the 8192-byte "row" (``row_bytes``
    default) is OUR modeling unit, chosen so a row is large relative to a RaBitQ element (272 B)
@@ -38,7 +44,8 @@ Every injector is deterministic in ``seed`` and is undone byte-for-byte by ``res
 return conventions coexist:
 
 - Groups 1-3 return just the flipped ``(byte, bit)`` positions.
-- Group 4's shape injectors (``single_cell``, ``device_row``, ``device_column``) return
+- Group 4's shape injectors (``single_cell``, ``device_row``, ``device_column``,
+  ``miscorrection_word``) return
   ``(positions, record)``, where ``record`` is a JSON-serializable dict describing the shape
   name, anchor byte, coverage span, and per-shape parameters (see each function's docstring
   for its exact keys). ``random_shape`` returns ``(shape_name, positions, record)``.
@@ -310,6 +317,76 @@ def device_column(buf, region, seed, *, row_bytes=8192, n_rows=512):
         "col_offset": int(col_offset),
         "col_bit": int(col_bit),
         "n_rows": int(n_rows),
+    }
+    return positions, record
+
+
+def miscorrection_word(buf, region, seed, *, word_bytes=16, k_raw=2):
+    """On-die-ECC SEC MISCORRECTION: a k_raw-bit raw fault observed as k_raw+1 bits in one word.
+
+    The fourth shape, and the one that is not a geometry story but a CODE story. DDR5 carries
+    on-die ECC: a single-error-correcting code over 128 data bits + 8 parity bits per beat
+    (A-003, COMET/UCLA NanoCAD 2023; X-003, Criss et al., MEMSYS 2020, Fig. 5 — "during a read
+    access, 128 data bits and 8 check-bits are read from a DRAM bank"). A SEC code corrects one
+    bit. A TWO-bit raw fault inside the same ECC word exceeds its correction capacity, and the
+    decoder does not merely fail: the syndrome of a double error aliases onto some other
+    codeword position, so the corrector "repairs" a bit that was never broken. What software
+    sees is therefore k_raw raw flips PLUS one extra flip the ECC itself introduced — 3 wrong
+    bits where the device had 2 — all confined to the ~16-byte ECC word (X-003 bounds the span
+    at <=16 bits per access).
+
+    That confinement is the point: unlike ``device_row`` (an 8 KB block) or ``device_column``
+    (a stripe across 512 rows), this is a LOCALIZED multi-bit burst. It is the event class the
+    DDR5-generation literature says the software layer actually meets most often, because
+    on-die ECC masks the single-bit faults (~80% of DDR5 faults per Chung, MICRO 2025) and lets
+    through the ones it mishandles.
+
+    Implementation: the anchor byte is drawn uniformly from ``region``; the ``word_bytes``-
+    aligned span containing it (aligned to the BUFFER start, not the region — an ECC word
+    boundary is a property of the DRAM, not of our region bookkeeping) is the fault's extent,
+    clamped to ``[0, len(buf))``. ``k_raw + 1`` DISTINCT bit positions are then drawn uniformly
+    inside that span and flipped: the first ``k_raw`` are the raw device errors, the last is the
+    bit the miscorrecting decoder flipped. Distinctness matters — two flips of the same bit
+    would cancel, and a miscorrection that lands back on a raw error bit would be a correction.
+    Returns ``(positions, record)``; ``record["raw_bits"]`` / ``record["miscorrection_bits"]``
+    split the two causes, ``record["coverage"]`` is the exact ``[lo, hi)`` word span, and
+    ``record["bytes_touched"]`` (<= 3) is the exact distinct-byte count. Deterministic in
+    ``seed``; ``restore(buf, positions)`` round-trips.
+
+    MODELING APPROXIMATION: the exact JEDEC JESD79-5 on-die-ECC parity-check matrix is
+    confidential (A-GAP-03), so WHICH bit a given double-error syndrome aliases onto cannot be
+    reproduced — this injector draws that bit uniformly within the word instead. The word size
+    and the "2 raw -> 3 observed, confined to one word" structure are the parts anchored in
+    A-003/X-003; the intra-word position of the miscorrected bit is not. ``word_bytes=16`` is
+    the 128-data-bit beat; treat ``word_bytes``/``k_raw`` as sensitivity knobs.
+    """
+    byte_start, n_bits = _region_bounds(region)
+    byte_len = n_bits // 8
+    if word_bytes <= 0:
+        raise ValueError(f"word_bytes must be >0, got {word_bytes}")
+    if k_raw < 1:
+        raise ValueError(f"k_raw must be >=1 (a miscorrection needs a raw fault), got {k_raw}")
+    rng = np.random.default_rng(seed)
+    anchor_byte = byte_start + int(rng.integers(0, byte_len))
+    lo = (anchor_byte // word_bytes) * word_bytes
+    hi = min(lo + word_bytes, len(buf))
+    word_bits = (hi - lo) * 8
+    n_flips = int(k_raw) + 1                       # k_raw raw errors + the miscorrected bit
+    if n_flips > word_bits:
+        raise ValueError(f"{n_flips} flips exceed the {word_bits}-bit ECC word at [{lo},{hi})")
+    bit_offsets = rng.choice(word_bits, size=n_flips, replace=False)
+    positions = [_bit_to_pos(lo, int(b)) for b in bit_offsets]
+    flip_bits(buf, positions)
+    record = {
+        "shape": "miscorrection_word",
+        "anchor_byte": int(anchor_byte),
+        "coverage": [int(lo), int(hi)],
+        "bits_flipped": n_flips,
+        "bytes_touched": len({b for b, _ in positions}),
+        "word_bytes": int(word_bytes),
+        "k_raw": int(k_raw),
+        "raw_bits": [list(p) for p in positions[:int(k_raw)]],
+        "miscorrection_bits": [list(p) for p in positions[int(k_raw):]],
     }
     return positions, record
 

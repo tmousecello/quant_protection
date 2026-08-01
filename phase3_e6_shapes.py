@@ -271,8 +271,26 @@ def count_field_hits(rmap, positions, resolver=None):
     return dict(sorted(hits.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
+# Shapes registered by ANOTHER driver that reuses this machinery without joining E6's grid.
+# phase3_e9_miscorrection.py registers `miscorrection_word` here at import time so it can share
+# measure_cell / inject_shape / shape_kwargs verbatim; SHAPES (E6's own 3x7 grid) is deliberately
+# left alone, so E6's row-count gate, shard metadata and published artifact keep their meaning.
+EXTRA_SHAPES = {}
+
+
+def register_shape(name, injector, kwargs_builder=None):
+    """Register an out-of-grid shape: `injector(buf, region, seed, **kwargs) -> (positions, record)`.
+
+    `kwargs_builder(cfg) -> dict` supplies the shape's modeling knobs from the run config, the
+    same way `shape_kwargs` does for the built-in three.
+    """
+    EXTRA_SHAPES[name] = (injector, kwargs_builder or (lambda cfg: {}))
+
+
 def shape_kwargs(shape, cfg):
     """The modeling knobs each shape takes (row_bytes/n_rows/p_in_row are NOT datasheet facts)."""
+    if shape in EXTRA_SHAPES:
+        return EXTRA_SHAPES[shape][1](cfg)
     if shape == "device_row":
         return {"row_bytes": int(cfg["row_bytes"]), "p_in_row": float(cfg["p_in_row"])}
     if shape == "device_column":
@@ -287,16 +305,19 @@ def inject_shape(buf, shape, anchor_byte, seed, **kwargs):
     so the stratified anchor is imposed by handing them a ONE-BYTE region: the drawn anchor can
     then only be `anchor_byte`, while everything downstream of the anchor (which bit within the
     byte, the row block, the column stripe's (col_offset, col_bit) and its precession across
-    rows) is still the injector's own seeded draw. The damage therefore extends far outside that
-    one byte for the device shapes — by design; see the module docstring.
+    rows, the miscorrection word's three bits) is still the injector's own seeded draw. The
+    damage therefore extends far outside that one byte for every shape but single_cell — by
+    design; see the module docstring.
     """
-    if shape not in SHAPES:
-        raise ValueError(f"unknown shape {shape!r}; choose from {SHAPES}")
+    if shape in EXTRA_SHAPES:
+        injector = EXTRA_SHAPES[shape][0]
+    elif shape in SHAPES:
+        injector = {"single_cell": faults.single_cell, "device_row": faults.device_row,
+                    "device_column": faults.device_column}[shape]
+    else:
+        raise ValueError(f"unknown shape {shape!r}; choose from "
+                         f"{tuple(SHAPES) + tuple(EXTRA_SHAPES)}")
     region = (int(anchor_byte), 1)
-    injector = {"single_cell": faults.single_cell, "device_row": faults.device_row,
-                "device_column": faults.device_column}[shape]
-    if shape == "single_cell":
-        return injector(buf, region, seed)
     return injector(buf, region, seed, **kwargs)
 
 
@@ -499,7 +520,12 @@ def _load_weights(path):
     return {"path": p, "present": True, "sha256": provenance.sha256_file(p), "weights": blob}
 
 
-def setup_context(args, cfg):
+def setup_context(args, cfg, prefix="e6"):
+    """Clean index + CRC manifest + both-path baseline + provenance, shared by E6 and E9.
+
+    `prefix` names the output files (E9 reuses this whole preflight verbatim and only wants its
+    own filenames); every gate below is identical for both drivers.
+    """
     adapter = get_adapter(args.adapter)
     aname = adapter_name(adapter)
     out = os.path.abspath(args.out)
@@ -510,9 +536,9 @@ def setup_context(args, cfg):
     clean_buf = adapter.serialize_index()
     rmap = adapter.region_map()
     gt = adapter.load_groundtruth()
-    tmp = os.path.join(out, "raw", f"_e6{tag}.index")
+    tmp = os.path.join(out, "raw", f"_{prefix}{tag}.index")
 
-    manifest_path = os.path.join(out, f"e6_clean_{MANIFEST_FIELD}{tag}.crcmf")
+    manifest_path = os.path.join(out, f"{prefix}_clean_{MANIFEST_FIELD}{tag}.crcmf")
     crc_manifest.write_manifest(clean_buf, manifest_path, field=MANIFEST_FIELD, rmap=rmap)
     pre = crc_manifest.verify_buffer(clean_buf, crc_manifest.read_manifest(manifest_path))
     if pre:
@@ -559,12 +585,15 @@ def setup_context(args, cfg):
         corrupted_regions=list(STRATA), recovery=["off", RECOVERY_MODE],
         crc_manifest_sha256=provenance.sha256_file(manifest_path))
     meta["shape_weights"] = _load_weights(getattr(args, "weights", None))
-    meta["fault_shape_modeling"] = {
-        "row_bytes": int(cfg["row_bytes"]), "n_rows": int(cfg["n_rows"]),
-        "p_in_row": float(cfg["p_in_row"]),
-        "caveat": ("row_bytes/n_rows are OUR modeling units (qp.faults group-4 caveat), not "
-                   "datasheet DRAM geometry — treat as sensitivity knobs, not hardware facts."),
-    }
+    # Only when this run's cfg actually carries the device-shape knobs — E9's cfg has its own
+    # (word_bytes/k_raw) and stamps them itself rather than reporting E6 defaults it never used.
+    if all(k in cfg for k in ("row_bytes", "n_rows", "p_in_row")):
+        meta["fault_shape_modeling"] = {
+            "row_bytes": int(cfg["row_bytes"]), "n_rows": int(cfg["n_rows"]),
+            "p_in_row": float(cfg["p_in_row"]),
+            "caveat": ("row_bytes/n_rows are OUR modeling units (qp.faults group-4 caveat), not "
+                       "datasheet DRAM geometry — treat as sensitivity knobs, not hardware facts."),
+        }
     meta["outcome_thresholds"] = {"retention_tol": RETENTION_TOL, "delta_tol": DELTA_TOL}
     meta["clean_baseline_both_paths"] = {
         "search_corrupted_recall@10": clean_recall,
@@ -583,7 +612,7 @@ def setup_context(args, cfg):
                          "element 300,000. The guard's own counter is kept as guard_oob_elements."),
     }
 
-    log(f"[e6] adapter={aname} out={out} clean@10={clean_recall:.5f} "
+    log(f"[{prefix}] adapter={aname} out={out} clean@10={clean_recall:.5f} "
         f"(recovery path {clean_rec_recall:.5f}) n={rmap['header']['cur_element_count']} "
         f"ef={cfg['ef']} seeds={cfg['seeds']}")
     return {"adapter": adapter, "aname": aname, "out": out, "tag": tag, "rmap": rmap,

@@ -200,6 +200,65 @@ def test_stub_recovery_contract(clean_setup):
     assert res["stats"]["totals"]["fallbacks"] > 0
 
 
+# ---------------------------------------------------------------------------
+# --crc-mode pass-through (stub: plumbing only — see stub_adapter.query_with_recovery)
+# ---------------------------------------------------------------------------
+
+def test_stub_crc_mode_passthrough(clean_setup):
+    """The flag must reach the adapter, be echoed, and not invent on-access numbers."""
+    buf, rmap, mf, tmp_path = clean_setup
+    clean_f = str(tmp_path / "clean.index")
+    buf.tofile(clean_f)
+
+    load = adapter.query_with_recovery(clean_f, "fallback_eb", mf, crc_mode="load")
+    lazy = adapter.query_with_recovery(clean_f, "fallback_eb", mf, crc_mode="lazy")
+    assert load["stats"]["crc_mode"] == "load"
+    assert lazy["stats"]["crc_mode"] == "lazy"
+    # Same predicate, same decision points -> same answer. (The stub cannot prove this for the
+    # real search; that is phase3_expb_recovery --lazy-gate's job.)
+    assert np.array_equal(load["ids"], lazy["ids"])
+    # No load scan ran under lazy, so its totals are zero rather than carried over...
+    assert lazy["stats"]["load"] == {"elements_checked": 0, "elements_crc_fail": 0}
+    # ...and the on-access counters are None, not a plausible-looking invented number.
+    assert lazy["stats"]["crc"]["checks"] is None
+    assert lazy["stats"]["crc"]["distinct_elements_failed"] is None
+    assert load["stats"]["crc"]["checks"] == 0
+
+    lazy_t = adapter.query_with_recovery(clean_f, "fallback_eb", mf, crc_mode="lazy",
+                                         crc_timer=True)
+    assert lazy_t["stats"]["crc"]["timer_enabled"] is True
+
+    eb = adapter.search_with_eb_fallback(clean_f, 0.0, crc_manifest=mf, crc_mode="lazy")
+    assert eb["stats"]["crc_mode"] == "lazy"
+
+    with pytest.raises(ValueError):
+        adapter.query_with_recovery(clean_f, "fallback_eb", mf, crc_mode="bogus")
+    # recovery=none never CRCs, so "when" is meaningless there — reject rather than echo.
+    with pytest.raises(ValueError):
+        adapter.query_with_recovery(clean_f, "none", None, crc_mode="lazy")
+
+
+def test_crc_fail_count_check_is_mode_aware():
+    """load pins the exact count; lazy bounds it — and 0 must still FAIL (not a tautology)."""
+    def row(load_fail=None, distinct=None):
+        return {"failure_mode": metrics.CLEAN,
+                "stats": {"load": {"elements_crc_fail": load_fail},
+                          "crc": {"distinct_elements_failed": distinct}}}
+
+    expb._check_crc_fail_count(row(load_fail=50), 50, "fallback_eb", "load")
+    with pytest.raises(AssertionError):
+        expb._check_crc_fail_count(row(load_fail=49), 50, "fallback_eb", "load")
+
+    expb._check_crc_fail_count(row(distinct=7), 50, "fallback_eb", "lazy")
+    expb._check_crc_fail_count(row(distinct=50), 50, "fallback_eb", "lazy")
+    with pytest.raises(AssertionError):      # nothing was ever checked
+        expb._check_crc_fail_count(row(distinct=0), 50, "fallback_eb", "lazy")
+    with pytest.raises(AssertionError):      # flagged elements Python never touched
+        expb._check_crc_fail_count(row(distinct=51), 50, "fallback_eb", "lazy")
+    # stub rows carry None (no real search knows who was consulted) -> skipped, not failed
+    expb._check_crc_fail_count(row(distinct=None), 50, "fallback_eb", "lazy")
+
+
 def test_real_adapter_requires_manifest_for_eb():
     """The real adapter must still report-and-stop without a manifest (never fake EB)."""
     from qp.rabitq import adapter as real_adapter

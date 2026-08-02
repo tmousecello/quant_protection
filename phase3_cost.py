@@ -12,10 +12,18 @@ Cost model (Stage 0 brief, component 3):
                 plus any CRC/checksum bytes added for detection)
   scrub_cost = scrub_bytes · freq                 (bytes re-read per scrub × scrub frequency;
                                                     also expressible as a % of throughput)
-  total      = mem_cost + scrub_overhead          (the unified F3 budget)
+  detect_cost = crc_bytes_per_query · qps         (query-path detection: bytes CRC'd on the
+                                                    service path; also a % of query time)
+  total      = mem_cost + scrub_overhead + detection_overhead
 
 A `protection_assignment` maps struct name -> {"mult": int, "checksum_bytes": int}. Structs
 absent from the assignment are unprotected (mult=1, no checksum), contributing 0 overhead.
+
+The three terms are in DIFFERENT units on purpose — memory bytes, background byte-rate, and
+query-path time — and total_cost only adds what the caller normalised. Detection has both a
+space cost (the CRC manifest, already in mem_cost via checksum_bytes) and a time cost (this
+term, measured by phase3_expb_recovery.py --lazy-gate under --crc-mode lazy); the paper's
+0.03–5.7% granularity figures are the SPACE side alone, so never quote them for this one.
 """
 
 
@@ -69,10 +77,40 @@ def scrub_overhead_pct(scrub_bytes, freq, throughput_bytes_per_s):
     return 100.0 * scrub_cost(scrub_bytes, freq) / float(throughput_bytes_per_s)
 
 
-def total_cost(mem, scrub_overhead):
-    """Unified F3 budget: protection memory bytes + scrub overhead (same unit as caller passes)."""
+def detection_cost(crc_bytes_per_query, qps):
+    """Bytes CRC'd per unit time on the query path: crc_bytes_per_query · qps.
+
+    The scrub-side twin of scrub_cost, for on-access (--crc-mode lazy) detection. Feed it the
+    MEASURED stats.crc.bytes / nq from a lazy run rather than an assumed per-query figure: the
+    number depends on the policy (drop consults every unvisited neighbour, EB only candidates
+    that reach rerank) and on ef, not just on the index.
+    """
+    if crc_bytes_per_query < 0 or qps < 0:
+        raise ValueError("crc_bytes_per_query and qps must be >= 0")
+    return float(crc_bytes_per_query) * float(qps)
+
+
+def detection_overhead_pct(detect_ns, search_ns):
+    """Query-path detection time as a percentage of search time.
+
+    Both arguments come from one lazy run's stats: the numerator from the load-vs-lazy
+    search_wall_ns delta (the unperturbed measurement) or from crc.ns (opt-in per-check timer,
+    inflated by its own clock reads), the denominator from the load run's search_wall_ns.
+    """
+    if search_ns <= 0:
+        raise ValueError("search_ns must be > 0")
+    return 100.0 * float(detect_ns) / float(search_ns)
+
+
+def total_cost(mem, scrub_overhead, detection_overhead=0.0):
+    """Unified F3 budget: protection memory + scrub overhead + query-path detection overhead.
+
+    Unit-agnostic: it adds what the caller passes, and the caller is responsible for having
+    normalised the three terms to a common unit first (they are natively bytes, a byte-rate,
+    and a time). detection_overhead defaults to 0, so the original two-term call is unchanged.
+    """
     mem_total = mem["total_bytes"] if isinstance(mem, dict) else float(mem)
-    return float(mem_total) + float(scrub_overhead)
+    return float(mem_total) + float(scrub_overhead) + float(detection_overhead)
 
 
 def reconcile(analytic_protected_bytes, serialized_size_delta, rtol=0.01, atol=0.0):

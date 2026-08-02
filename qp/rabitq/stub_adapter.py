@@ -324,7 +324,8 @@ def _recall(ids, gt, k):
 
 
 def search_with_eb_fallback(index_path, fraction, seed=0, *, crc_manifest=None, k=None,
-                            ef=2000, out_path=None, query_f=None, gt_f=None, timeout=None):
+                            ef=2000, out_path=None, query_f=None, gt_f=None, timeout=None,
+                            crc_mode="load", crc_timer=False):
     """Stub stand-in for the EB-fallback search path (E5 slope layer / Option B).
 
     Same signature as the real adapter. With `crc_manifest` it routes through the Option-B
@@ -335,7 +336,7 @@ def search_with_eb_fallback(index_path, fraction, seed=0, *, crc_manifest=None, 
     if crc_manifest:
         res = query_with_recovery(index_path, "fallback_eb", crc_manifest, k=k, ef=ef,
                                   out_path=out_path, query_f=query_f, gt_f=gt_f,
-                                  timeout=timeout)
+                                  timeout=timeout, crc_mode=crc_mode, crc_timer=crc_timer)
         res["distances"] = None
     else:
         res = search_corrupted(index_path, k=k, ef=ef, out_path=out_path,
@@ -348,6 +349,7 @@ def search_with_eb_fallback(index_path, fraction, seed=0, *, crc_manifest=None, 
 # --- Option B: recovery-mode query (real CRC verification, FAKE recall model) -----------------
 
 RECOVERY_MODES = ("none", "drop", "fallback_eb")
+CRC_MODES = ("load", "lazy")
 
 # recall-retention slopes per recovery mode as a function of the corrupted-element fraction f.
 # CHOSEN, not measured: they exist only so the driver's gate/sweep plumbing has a deterministic
@@ -372,7 +374,8 @@ def _corrupt_ex_elements(buf):
 
 
 def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=None, ef=2000,
-                        out_path=None, stats_json=None, query_f=None, gt_f=None, timeout=None):
+                        out_path=None, stats_json=None, query_f=None, gt_f=None, timeout=None,
+                        crc_mode="load", crc_timer=False):
     """Deterministic stand-in for exp_dumpids --recovery (same contract as the real adapter).
 
     The CRC side is REAL: with a manifest, the failing-element set comes from
@@ -380,6 +383,14 @@ def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=Non
     geometry echo, and verification code paths are genuinely exercised offline); recovery=none
     diffs against the pristine buffer instead (no CRC check, mirroring the C++ none mode).
     Only the fraction -> recall mapping is a documented fake (_RECOVERY_SLOPE).
+
+    `crc_mode` is accepted and echoed, but the stub deliberately does NOT model it. There is no
+    real search here, so nothing knows which elements a query would have consulted — and the
+    on-access counters are exactly the quantity that depends on that. Under crc_mode="lazy" the
+    load-scan totals are zeroed (matching the binary: no scan ran) and every on-access counter
+    is None, i.e. "not knowable offline", never a plausible-looking invented number. What the
+    stub does check is that the flag reaches here and nothing breaks; the counters themselves
+    are gated on the real adapter (phase3_expb_recovery.py --lazy-gate).
     """
     from qp.rabitq import crc_manifest as cm
 
@@ -388,6 +399,10 @@ def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=Non
         raise ValueError(f"recovery must be one of {RECOVERY_MODES}, got {recovery!r}")
     if recovery != "none" and not crc_manifest:
         raise ValueError(f"--recovery {recovery} requires a crc_manifest path")
+    if crc_mode not in CRC_MODES:
+        raise ValueError(f"crc_mode must be one of {CRC_MODES}, got {crc_mode!r}")
+    if recovery == "none" and (crc_mode != "load" or crc_timer):
+        raise ValueError("recovery='none' never checks a CRC; crc_mode/crc_timer do not apply")
     gt = load_groundtruth()
     buf = np.fromfile(index_path, dtype=np.uint8)
 
@@ -404,11 +419,21 @@ def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=Non
     recall = max(0.05, CLEAN_RECALL * (1.0 - _RECOVERY_SLOPE[recovery] * frac))
     ids = _ids_for_recall(recall, gt, k)
     per_hit = len(failing)                # deterministic fake counter model
+    lazy = (crc_mode == "lazy")
     stats = {
         "recovery": recovery, "crc_manifest": crc_manifest or "", "ef": int(ef), "topk": k,
         "nq": NQ,
-        "load": {"elements_checked": checked,
-                 "elements_crc_fail": len(failing) if recovery != "none" else 0},
+        "crc_mode": crc_mode,
+        # Zeroed under lazy for the same reason the binary zeroes them: no load scan ran.
+        "load": {"elements_checked": 0 if lazy else checked,
+                 "elements_crc_fail": 0 if lazy else
+                                      (len(failing) if recovery != "none" else 0)},
+        # None = not knowable without a real search (see the docstring). Under load these are
+        # 0 for the same reason as the binary: the query path computes no CRC.
+        "crc": {"checks": None if lazy else 0, "bytes": None if lazy else 0,
+                "ns": None if lazy else 0, "oob_skipped": None if lazy else 0,
+                "timer_enabled": bool(crc_timer),
+                "distinct_elements_failed": None if lazy else 0},
         "totals": {"consults": n * NQ if recovery != "none" else 0,
                    "corrupt_hits": per_hit * NQ if recovery != "none" else 0,
                    "fallbacks": per_hit * NQ if recovery == "fallback_eb" else 0,

@@ -227,6 +227,43 @@ def _light_expb_records(expb_dir):
     return rows
 
 
+def _read_detection_overhead(expb_dir):
+    """Query-path detection cost per recovery policy, from the --lazy-gate acceptance run.
+
+    Returns {policy: {"ns_per_query": x|None, "pct_of_search": x|None, ...}} — None (blank in
+    the CSV) when expb_lazy_gates.json is absent or the run did not pass, because an unmeasured
+    time cost must read as unmeasured, not as zero. The headline is the load-vs-lazy
+    search_wall_ns delta; the timer and analytic figures ride along as cross-checks.
+    """
+    blank = {"ns_per_query": None, "pct_of_search": None, "crc_bytes_per_query": None,
+             "timed_ns_per_check": None, "analytic_ns_per_query": None}
+    out = {"fallback_eb": dict(blank), "drop": dict(blank), "source": None}
+    path = os.path.join(expb_dir, "expb_lazy_gates.json")
+    if not os.path.isfile(path):
+        return out
+    with open(path) as fh:
+        gates = json.load(fh)
+    if not gates.get("all_pass"):
+        # A failed alignment run means the two modes disagreed; its overhead numbers describe
+        # a search we have not shown to be the same search. Do not propagate them.
+        return out
+    out["source"] = path
+    out["adapter"] = gates.get("adapter")
+    for policy, entry in (gates.get("overhead") or {}).items():
+        if policy not in out:
+            continue
+        nq = entry.get("n_queries")
+        out[policy] = {
+            "ns_per_query": entry.get("headline_delta_ns_per_query"),
+            "pct_of_search": entry.get("headline_pct_of_search"),
+            "crc_bytes_per_query": (entry["crc_bytes"] / nq
+                                    if entry.get("crc_bytes") and nq else None),
+            "timed_ns_per_check": entry.get("timed_ns_per_check"),
+            "analytic_ns_per_query": entry.get("analytic_ns_per_query"),
+        }
+    return out
+
+
 def synthesize(args):
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
@@ -309,17 +346,27 @@ def synthesize(args):
     # + 16 B/entry), lives beside the index — same cost for drop and EB.
     manifest_bytes = 64 + 16 * n_elem
     protect_total = cliff_cost["total_bytes"] + manifest_bytes
+    # Query-path detection overhead — a TIME cost, deliberately kept out of the byte totals
+    # above. Measured by phase3_expb_recovery.py --lazy-gate (--crc-mode lazy vs load); absent
+    # until that has been run, in which case the columns are blank rather than guessed.
+    detect = _read_detection_overhead(args.expb_dir)
     frontier_path = os.path.join(out_dir, "frontier.csv")
     with open(frontier_path, "w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(["r_min", "fstar_drop", "fstar_eb", "interval_ratio",
                          "cliff_protection_bytes", "slope_manifest_bytes",
-                         "total_protection_bytes", "protection_pct_of_index"])
+                         "total_protection_bytes", "protection_pct_of_index",
+                         "detect_ns_per_query_eb", "detect_pct_of_search_eb",
+                         "detect_ns_per_query_drop", "detect_pct_of_search_drop"])
         for r in table:
             writer.writerow([r["r_min"], r["fstar_drop"], r["fstar_eb"],
                              r["interval_ratio"], cliff_cost["total_bytes"],
                              manifest_bytes, protect_total,
-                             round(100.0 * protect_total / total_bytes, 4)])
+                             round(100.0 * protect_total / total_bytes, 4),
+                             detect["fallback_eb"]["ns_per_query"],
+                             detect["fallback_eb"]["pct_of_search"],
+                             detect["drop"]["ns_per_query"],
+                             detect["drop"]["pct_of_search"]])
 
     summary = {
         "outputs": {"main_timeline_csv": csv_path, "main_timeline_png": png_path,
@@ -327,7 +374,8 @@ def synthesize(args):
         "timeline_final_recalls": {lab: series[lab][-1][1] for lab in series},
         "predictions": predictions,
         "cost": {"cliff": cliff_cost, "slope_manifest_bytes": manifest_bytes,
-                 "index_total_bytes": total_bytes, "n_elements": n_elem},
+                 "index_total_bytes": total_bytes, "n_elements": n_elem,
+                 "query_path_detection": detect},
         "meta": provenance.collect_provenance(
             adapter, adapter_name(adapter), {"recall@10": clean_recall},
             {"rmin_grid": list(RMIN_GRID)}, args, rmap),

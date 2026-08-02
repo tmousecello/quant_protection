@@ -60,8 +60,10 @@ artifacts/phase3/e*/*.out.ivecs
 
 # --- expb (Option B) temp/regenerable binaries: 280M index copies, dumped ids, CRC manifest ---
 artifacts/phase3/expb/_expb_*.index
-artifacts/phase3/expb/_expb_dumpids.ivecs
-artifacts/phase3/expb/_expb_dumpids.ivecs.stats.json
+# Glob, not the two exact names: _run_one appends _<crc_mode> for anything but load
+# (_expb_dumpids_lazy.ivecs[.stats.json]), and an exact-name rule silently stops covering
+# the scratch the moment a new mode is added.
+artifacts/phase3/expb/_expb_dumpids*
 artifacts/phase3/expb/*.crcmf
 
 # E6/E7 write the same 16 MB per-element CRC manifest (1M entries x 16 B) next to their results;

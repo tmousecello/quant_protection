@@ -28,8 +28,31 @@ NQ = 64                               # synthetic query count
 INDEX_PATH = os.path.join(tempfile.gettempdir(), "qp_rabitq_stub.index")
 
 # Synthetic SIFT-b7-shaped geometry (small element count so a full file is a few tens of KB).
+# The upper-link stream is DERIVED from _element_levels, not a byte constant: E8 studies the
+# `[uint32 len][len bytes]` record framing, which cannot exist in a zero-length region.
 _GEOM = dict(dim=128, padded_dim=128, ex_bits=6, num_cluster=16, cur_element_count=64,
-             M=16, maxM=16, maxM0=32, num_upper_link_bytes=0)
+             M=16, maxM=16, maxM0=32)
+
+
+def _element_levels(n):
+    """Deterministic HNSW level per element, shaped like a real index (most elements at level 0).
+
+    Real indexes are dominated by len==0 records (937,001 of 1,000,000 on SIFT b=7), so the stub
+    keeps that skew: every 8th element reaches level 1 and every 32nd reaches level 2. maxlevel is
+    derived from this list, so the framing guard's bound (0 or slpe*level, level <= maxlevel) is
+    exercised against the same invariant the real index satisfies.
+    """
+    return [2 if i % 32 == 0 else (1 if i % 8 == 0 else 0) for i in range(int(n))]
+
+
+def _upper_link_stream(levels, size_links_per_element):
+    """The upper_links block exactly as save() writes it (hnsw.hpp L655-662)."""
+    out = bytearray()
+    for lvl in levels:
+        link_list_size = size_links_per_element * lvl if lvl > 0 else 0
+        out += struct.pack("<I", link_list_size)
+        out += bytes(link_list_size)                  # zero payload; only the framing matters here
+    return np.frombuffer(bytes(out), dtype=np.uint8).copy()
 
 
 def _build_header(g):
@@ -46,7 +69,8 @@ def _build_header(g):
         "ex_bits": g["ex_bits"], "size_bin_data": bin_bytes, "size_ex_data": ex_bytes,
         "size_links_level0": spe_links, "offsetBinData": off_bin, "offsetExData": off_ex,
         "label_offset": 0, "size_data_per_element": spe, "size_links_per_element": spe_links,
-        "maxlevel": 0, "enterpoint_node": 0, "M": g["M"], "maxM": g["maxM"], "maxM0": g["maxM0"],
+        "maxlevel": max(_element_levels(g["cur_element_count"])),
+        "enterpoint_node": 0, "M": g["M"], "maxM": g["maxM"], "maxM0": g["maxM0"],
         "mult": 0.5, "ef_construction": 200,
     }
 
@@ -62,13 +86,44 @@ def _build_pristine():
     centroids = g["num_cluster"] * g["padded_dim"] * layout.FLOAT
     level0 = g["cur_element_count"] * hdr["size_data_per_element"]
     rot = layout.rotation_bytes(g["padded_dim"])
-    total = (layout.HEADER_BYTES + centroids + level0 + g["num_upper_link_bytes"] + rot)
+    upper = _upper_link_stream(_element_levels(g["cur_element_count"]),
+                               hdr["size_links_per_element"])
+    total = (layout.HEADER_BYTES + centroids + level0 + upper.size + rot)
     buf = np.zeros(total, dtype=np.uint8)
     buf[:layout.HEADER_BYTES] = np.frombuffer(_pack_header(hdr), dtype=np.uint8)
+    upper_start = layout.HEADER_BYTES + centroids + level0
+    buf[upper_start:upper_start + upper.size] = upper
     return buf
 
 
 _PRISTINE = _build_pristine()
+
+
+def _materialize_index_path():
+    """Keep the on-disk INDEX_PATH in sync with _PRISTINE.
+
+    Callers that read `adapter.INDEX_PATH` as a FILE (phase3_e7_episode.py's panel-B reload
+    timing, provenance's index sha256) got whatever an earlier run happened to leave in /tmp.
+    Nothing ever wrote it deliberately, so a geometry change left a stale file of the OLD size
+    behind and search_corrupted then read it as "size changed => corrupted" and raised a
+    simulated SIGSEGV — a failure with no connection to what the caller was testing.
+
+    Written via a unique temp file + atomic rename so concurrent test processes never observe a
+    half-written index.
+    """
+    try:
+        if os.path.isfile(INDEX_PATH) and os.path.getsize(INDEX_PATH) == _PRISTINE.size:
+            if np.array_equal(np.fromfile(INDEX_PATH, dtype=np.uint8), _PRISTINE):
+                return
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(INDEX_PATH), suffix=".stubidx")
+        os.close(fd)
+        _PRISTINE.tofile(tmp)
+        os.replace(tmp, INDEX_PATH)
+    except OSError:
+        pass          # a read-only/full tmpdir must not break importing the stub
+
+
+_materialize_index_path()
 
 
 # --- interface mirror: file substrate ----------------------------------------
@@ -140,7 +195,30 @@ _OUTCOME = {
     "label": (0.90, "ok"),
     "links": (0.90, "ok"),
     "header": (0.0, "crash"),
+    # E8: the upper_links block splits into two structures with OPPOSITE outcomes. A flip in a
+    # record's uint32 length prefix changes how many bytes that record consumes, desynchronizing
+    # every later record AND the rotation read that follows them (hnsw.hpp L737-750, L763) ->
+    # silent collapse. A flip in the payload perturbs one upper-level edge -> benign. Both
+    # fractions mirror the measured real-index behaviour (phase3_e8_framing.py).
+    "upper_link_len": (0.0, "ok"),
+    "upper_links": (1.00, "ok"),
 }
+
+
+def _upper_len_offsets():
+    """Absolute offsets of the upper-link length words in _PRISTINE (cached; pure geometry)."""
+    global _UPPER_LEN_OFFSETS
+    if _UPPER_LEN_OFFSETS is None:
+        rmap = region_map()
+        up = next(r for r in rmap["regions"] if r["name"] == "upper_links")
+        recs = layout.parse_upper_link_records(
+            _PRISTINE, rmap["header"]["cur_element_count"], up["byte_start"], up["byte_len"])
+        _UPPER_LEN_OFFSETS = frozenset(
+            o + j for o in recs["len_offsets"] for j in range(layout.LEN_WORD_BYTES))
+    return _UPPER_LEN_OFFSETS
+
+
+_UPPER_LEN_OFFSETS = None
 
 
 def _resolve_structure(off):
@@ -159,6 +237,9 @@ def _resolve_structure(off):
         if r["name"] in ("level0",) or r["name"].startswith("elem0."):
             continue
         if r["byte_start"] is not None and r["byte_start"] <= off < r["byte_start"] + r["byte_len"]:
+            # Split upper_links into its framing and payload halves — they behave oppositely.
+            if r["name"] == "upper_links" and off in _upper_len_offsets():
+                return "upper_link_len"
             return r["name"]
     return "header"   # offsets inside the 156-B header / unmapped -> crash structure
 

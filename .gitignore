@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 .DS_Store
 *.egg-info/
+uv.lock
 
 # --- logs ---
 *.log
@@ -62,3 +63,7 @@ artifacts/phase3/expb/_expb_*.index
 artifacts/phase3/expb/_expb_dumpids.ivecs
 artifacts/phase3/expb/_expb_dumpids.ivecs.stats.json
 artifacts/phase3/expb/*.crcmf
+
+# E6/E7 write the same 16 MB per-element CRC manifest (1M entries x 16 B) next to their results;
+# it is regenerated from the clean index in under a second, so it never belongs in git.
+artifacts/phase3/e*/*.crcmf

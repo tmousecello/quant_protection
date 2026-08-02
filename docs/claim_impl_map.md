@@ -186,13 +186,39 @@ keeps byte-identical compatibility with every frozen manifest and record, so not
 re-running.
 
 **But the ceiling is memory, not CRC.** Once the kernel is fast, what remains for `drop` is the
-1.98 MB/query of ex data it pulls in that the 1-bit traversal would never have touched. Projected
-(**not measured**): EB **+7.78% → ~1%** (its bytes are read anyway, so only compute remains, and
-it does only 771 checks); `drop` **+209.53% → ~40–70%**, bounded below by traffic that no CRC
-kernel can remove.
+1.98 MB/query of ex data it pulls in that the 1-bit traversal would never have touched.
 
-So hardware CRC **makes the piggyback claim true for EB** and **does not rescue `drop`**. The
-structural fix for `drop` is the consult site (option B), not a faster kernel.
+### ✅ Now measured — `rabitq_instrumentation/qp_crc32.hpp`, see `docs/crc_kernel.md`
+
+Both projections above were tested by implementing PCLMULQDQ folding (and slicing-by-8 as a
+control) and re-measuring. Median of 3 interleaved rounds, clean index, ef=2000, baseline
+`--recovery none`:
+
+| policy | table (was) | slice8 | **clmul** | projected | held? |
+|---|---|---|---|---|---|
+| `fallback_eb` | +8.51% | +3.55% | **+1.6–2.5%** | ~1% | close, slightly optimistic |
+| `drop` | +209.83% | +76.92% | **+49.92%** | 40–70% | **yes, mid-range** |
+
+Load-time scan (sequential CRC over the 96 MB ex region): 112.9 ms → **9.8 ms**, a **11.5×**
+kernel speedup (10.8 GB/s on the real index). Every kernel is bit-identical to `zlib.crc32`, and
+the acceptance gates re-run on `clmul` came back green with **recall identical to the last digit**
+(EB 0.94329, drop 0.94050) and bit-identical ids.
+
+**The EB claim is now unresolvable rather than small.** Five repeats put EB's on-access cost at
++1.62% with a within-arm spread 3.7× the delta. The right phrasing for §3 is "not resolvable
+against run-to-run variation", not a precise small percentage. Note `--lazy-gate` runs each arm
+once and reported **−1.73%** for EB on this build — that is noise, not a finding, and its EB
+headline should now be read as "below resolution".
+
+**`drop`'s remaining 50% is 75% memory, 25% compute.** From the acceptance run's own cross-check:
+`analytic` (crc_bytes × the *sequential* scan rate) = 182 µs/query vs a measured headline of
+736 µs/query. The 4× gap is the random-access penalty. ⚠️ **This also means the `analytic`
+cross-check is only valid in the compute-bound regime** — it tracked headline to within 23% with
+the table kernel and underestimates by 4× with `clmul`.
+
+So hardware CRC **makes the piggyback claim true for EB** and **does not rescue `drop`** — now
+with numbers behind both halves. The structural fix for `drop` is the consult site (option B),
+not a faster kernel.
 
 ### Not a legitimate optimization
 
@@ -233,9 +259,12 @@ ablation, rather than as two co-equal options.
    off/len);偵測器**常駐**的只有 4 B/元素 = **1.43%**,即階梯上原本就寫著的「1.4%」那一階。
    若講的是「必須與索引一起持久化的位元組」,5.7% 正確;若講的是「偵測層佔用的記憶體」,
    應為 **0.03–1.4%**。換數字時務必說明換的是哪一個量。見「Manifest file format ≠ resident cost」。
-6. **成本數字要標明 CRC 核心**:現行 `fi_crc32` 是逐位元組查表(1.53 ns/B),+7.78% / +209.53%
-   是這個核心的成本,不是 on-access 偵測的固有成本。硬體 CRC 之後 EB 才真的接近零(~1%),
-   而 drop 仍有 ~40–70%(額外記憶體流量,推估)。**若 §3 要主張偵測便宜,必須綁定 EB 政策。**
+6. **成本數字要標明 CRC 核心**,而且**現在必須引用 `clmul` 的數字,不是 table 的**:
+   +7.78% / +209.53% 是逐位元組查表核心(1.53 ns/B)的成本,不是 on-access 偵測的固有成本。
+   換成 PCLMULQDQ(同一個多項式、逐位元相同)後實測:
+   **EB 已量不出來**(+1.62%,而 run 間變異是該差值的 3.7 倍 —— 措辭應為「無法從一般執行變異中
+   分辨」,而非引用一個看似精確的小百分比);**drop 為 +49.92%**,其中約 75% 是記憶體流量、
+   25% 才是計算。**若 §3 要主張偵測便宜,必須同時綁定 EB 政策與快速核心。**
 3. §3.1 描述 on-access 時,可加一句限定:兩種時機(載入期全掃 / access 時重算)在「查詢期
    記憶體不可變」下逐位元等價,而本文的 fault model 正是不可變假設不成立的場景——這是選擇
    on-access 的理由,不只是效率考量。

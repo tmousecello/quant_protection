@@ -159,11 +159,75 @@ kernel does 5 folds (10 clmuls, chain depth 5) and no Barrett. At Zen 5's 4–5 
 predicts ≈25 cycles ≈ 4.4 ns at 5.7 GHz; measured **5.0 ns**. The model and the measurement agree,
 which is the reason to believe the number.
 
-**The scattered result also refutes a projection made in `claim_impl_map.md`** — that memory
-traffic, not CRC compute, would be the floor for `drop`. If memory dominated, the three kernels
-would converge in the scattered test. They do not: `clmul` is still 2.9× faster than `slice8`
-there. At 96 B random access, **compute still dominates**. The end-to-end measurement is what
-settles what that means for `drop`'s +209.53%.
+**The scattered result also bears on a projection in `claim_impl_map.md`** — that memory traffic,
+not CRC compute, would be the floor for `drop`. If memory dominated *at the table kernel's speed*,
+the three kernels would converge in the scattered test. They do not: `clmul` is still 2.9× faster
+than `slice8` there. So compute dominated while the kernel was slow; the end-to-end run below
+shows where the balance lands once it is fast.
+
+## End-to-end: what survives into the query path
+
+Clean index, ef=2000, k=10, nq=10 000, single-threaded, **median of 3 interleaved rounds** (all
+kernels re-measured in the same round so thermal drift cannot favour one). Baseline is
+`--recovery none`, i.e. **no detection at all**, at 1413.11 µs/query.
+
+| policy | `table` | `slice8` | `clmul` | clmul cuts |
+|---|---|---|---|---|
+| `fallback_eb` | +8.51% | +3.55% | **+2.55%** | 70% |
+| `drop` | +209.83% | +76.92% | **+49.92%** | 76% |
+
+Load-time scan (pure sequential CRC over the whole 96 MB `ex` region, the least perturbed measure
+available, median of 3):
+
+| impl | median | ns/byte | GB/s | speedup |
+|---|---|---|---|---|
+| `table` | 112.9 ms | 1.1765 | 0.85 | 1.00× |
+| `slice8` | 18.1 ms | 0.1880 | 5.32 | 6.26× |
+| `clmul` | **9.8 ms** | 0.1026 | 9.75 | **11.5×** |
+
+(The acceptance run on the real index measured the scan even faster — 8.8–8.9 ms, **10.8 GB/s**.)
+
+### Verdict on the two projections in `claim_impl_map.md`
+
+| projection | measured | |
+|---|---|---|
+| `drop` +209.53% → "~40–70%" | **+49.92%** | held, mid-range |
+| `fallback_eb` +7.78% → "~1%" | **+1.6–2.5%** | close, slightly optimistic |
+
+### `fallback_eb` is now below the noise floor — and that is the honest headline
+
+The acceptance run's single-shot comparison reported **−1.73%** for EB, i.e. the lazy arm appearing
+*faster* than the eager one. That is not a finding. Five interleaved repeats put the true delta at
+**+23 132 ns/query (+1.62%)** — positive — while the within-arm spread was **84 573 ns/query, 3.7×
+the delta itself**.
+
+So the correct statement is not "EB detection costs 1.6%" but **"EB detection is no longer
+resolvable against normal run-to-run variation."** For the paper's 「搭便車」 claim that is the
+strongest form the evidence can take, and it is worth saying that way rather than quoting a
+precise-looking small number.
+
+Methodological consequence: `--lazy-gate` runs each arm **once**. That was adequate when EB cost
++7.74% of search wall; at ~1.6% it is not. Its EB `headline_pct_of_search` should now be read as
+"below resolution", and any future EB cost claim needs repeats.
+
+### Where `drop`'s remaining 50% goes
+
+The acceptance run's own cross-check answers this. `analytic_ns_per_query` = `crc_bytes` × the
+*sequential* load-scan rate = **182 µs/query**; the measured headline is **736 µs/query**. The
+4× gap is the random-access penalty the sequential rate cannot see:
+
+- ~25% of what remains is CRC computation
+- ~75% is memory traffic — the 1.98 MB/query of `ex` data `drop` pulls in that the 1-bit
+  traversal would never have touched
+
+**So the memory-ceiling argument is now confirmed with numbers, but it only became true after the
+kernel got fast.** With the table kernel, compute dominated and `analytic` tracked `headline` to
+within 23%; now `analytic` underestimates by 4×. That cross-check was valid in the compute-bound
+regime and is not in the memory-bound one — worth knowing, since `claim_impl_map.md` presents it
+as a general sanity check.
+
+The corollary for `drop` stands and is now quantified: **no CRC kernel can remove that 75%.** The
+structural fix remains moving the consult site (option B), not a faster kernel.
 
 ## Caveats
 

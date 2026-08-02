@@ -48,6 +48,12 @@ C++ line numbers are for the patched header
 |---|---|---|---|
 | 13 | **Bounds-check skip turns pointer corruption into a skip, not a crash** | `hnsw.hpp:1549` `fi_safe_mode_` guard | **by construction**; `oob_restored` is structurally ~0 on a 1M index and `phase3_e6_shapes.py:573` refuses to report fictitious counts for exactly this reason |
 
+## §3.4 / §4 — cost accounting
+
+| # | Claim | Implementation | Level |
+|---|---|---|---|
+| 14 | **Tiered cost: 132 B catastrophe protection + 0.03–5.7% detection layer** (§3.4, abstract) | `phase3_f_synth.py` → `frontier.csv` `cliff_protection_bytes` / `slope_manifest_bytes` / `protection_pct_of_index` | **measured** for the *file* sizes (132 B and 16 000 064 B = 5.7027% of the 280 573 456 B index). **But the 5.7% upper bound is a serialization number, not a residency number** — see "Manifest file format ≠ resident cost" below. The honest resident range is **0.03–1.4%**. |
+
 ---
 
 ## The piggyback claim is policy-specific (new, and it constrains the wording)
@@ -72,6 +78,146 @@ Moving `drop`'s consult to the access point would fix this, but it would change 
 `FAULT_DROP` means (a dropped node currently contributes neither result nor routing) and
 invalidate every frozen expb record. That is option B, ruled out this round.
 
+### One nuance the measurement does NOT resolve
+
+The mechanism argument above ("EB's bytes are read anyway") predicts EB should pay a lower cost
+*per byte*, not merely fewer bytes. Converting the headline deltas to per-byte rates:
+
+| | ns per CRC'd byte |
+|---|---|
+| load-time scan (sequential, whole 96 MB) | 1.267–1.269 (two independent runs) |
+| `fallback_eb` (on-access) | 1.511 |
+| `drop` (on-access) | 1.651 |
+
+EB is only **8.5%** cheaper per byte than `drop`, and the other cross-check disagrees on the sign
+(`timed_ns_per_check`: EB 193.96 vs drop 186.95). **Two methods that disagree on the sign of an
+8.5% effect have not measured it.** So: the count ratio (26.8×) is resolved and load-bearing; the
+cache-locality saving that "搭便車" names is *not*. The likely reason is that at 96 B a
+byte-at-a-time software CRC is compute-bound, not bandwidth-bound, so whether the bytes were
+already resident barely matters.
+
+Wording consequence: say EB is cheap **because it checks 26.8× fewer times**, not because its
+bytes are already in cache. The latter is mechanically true and unmeasured.
+
+## Manifest file format ≠ resident cost (the 5.7% is not what the detector holds)
+
+The manifest entry is 16 B — `{u64 abs_file_offset, u32 len, u32 crc32}` (`crc_manifest.py`
+header spec) — which is where 16 MB / **5.7027%** comes from. But `off` and `len` are re-derivable
+from the geometry, and the implementation does exactly that: it re-derives them, uses them only to
+*verify* the manifest against the index, and then throws them away.
+
+```cpp
+std::vector<Entry> entries(n_entries);   // hnsw.hpp:293 — a LOCAL; freed when the function returns
+...
+    fi_crc_expect_[i] = entries[i].crc;  // hnsw.hpp:323 — only the 4-byte CRC survives
+```
+
+Resident structures after `load_crc_manifest()` returns:
+
+| structure | bytes/element | total | % of index | load | lazy |
+|---|---|---|---|---|---|
+| `ex_corrupt_` — eager verdict bitmap (`hnsw.hpp:69`) | 1 | 1 MB | 0.356% | ✅ | allocated but unused |
+| `fi_crc_expect_` — expected CRCs (`:138`) | 4 | 4 MB | **1.426%** | — | ✅ |
+| `fi_crc_seen_fail_` — distinct-count stats only (`:146`) | 1 | 1 MB | 0.356% | — | ✅ (droppable in production) |
+
+So **on-access detection's true resident cost is 4 B/element = 1.43% of the index**, which is
+exactly the "CRC32/元素為 1.4%" rung the paper's own granularity ladder already names. The 16 B
+figure is the on-disk serialization, carrying redundant fields whose only job is to make a
+mispaired manifest fail loudly rather than silently.
+
+**Wording consequence:** the abstract's 「偵測層開銷依 CRC 粒度為 0.03–5.7%」 quotes a file-format
+number as its upper bound. The resident range for the same granularity ladder is **0.03–1.4%**.
+This correction is in the paper's favour and needs no implementation change — but do not quietly
+swap the number without saying which quantity is being reported, since 5.7% is the right answer if
+what you mean is "bytes that must be persisted alongside the index".
+
+## Detection cost relative to NO detection
+
+`headline_pct_of_search` in `expb_lazy_gates.json` is measured against the **load** arm — i.e.
+detection is on in both arms and only the CRC's timing moves. That is the right denominator for
+"what does moving the CRC to the query path cost", but it is *not* "what does detection cost".
+The second question needs `recovery=none`, which `--lazy-gate` never runs.
+
+Measured directly on the clean index (all five configs produce byte-identical dumped ids, so the
+search work is identical and every delta is pure detection cost):
+
+| config | µs/query | vs `none` | CRC checks | CRC bytes | load-time scan |
+|---|---|---|---|---|---|
+| `none` | 1 433.98 | — | 0 | 0 | 0 |
+| `fallback_eb` + load | 1 424.83 | −0.64% (noise floor) | 0 | 0 | 118.6 ms |
+| `drop` + load | 1 466.92 | +2.30% | 0 | 0 | 118.7 ms |
+| `fallback_eb` + lazy | 1 545.60 | **+7.78%** | 7 549 690 | 724.8 MB | 0 |
+| `drop` + lazy | 4 438.68 | **+209.53%** | 204 517 241 | 19.63 GB | 0 |
+
+Three readings:
+
+1. **Eager detection is genuinely near-free on the query path** — EB below the noise floor, drop
+   +2.30%. That +2.30% has a clean account: 20 634 `ex_corrupt_[id]` bitmap lookups per query,
+   33 µs / 20 634 = **~1.6 ns per lookup**, the cost of one cached byte load. Its real price is the
+   one-off 118.7 ms scan — and the staleness that motivated this whole branch.
+2. **The `none` and `load` denominators give nearly the same answer** (drop: +209.53% vs +224.24%),
+   because `load` is itself only +2.30% over `none`. The remaining gap is that the headline run
+   used the *corrupted* index, where drop actually drops nodes (206.3 M vs 204.5 M consults).
+3. Per neighbour: search is 1 433.98 µs / 20 451.7 consults = **70.1 ns per neighbour evaluation**;
+   drop's on-access CRC adds **146.9 ns**. The CRC is **2.10× the entire per-neighbour search cost.**
+
+> **Provenance caveat.** Unlike every other number in this document, this table was produced by
+> invoking `exp_dumpids` directly, not by a driver, so it has no program-stamped provenance and no
+> artifact under `artifacts/phase3/`. Reproduce with, on `_expb_clean.index` + `expb_clean_ex_code.crcmf`:
+> `exp_dumpids <index> <query> <gt> l2 2000 <out> 10 --recovery {none|drop|fallback_eb} [--crc-manifest <mf>] [--crc-mode lazy] --stats-json <json>`.
+> **Promote it to a driver + test before §3 or §4 cites it.**
+
+## Optimization headroom (why the drop number is not a law of nature)
+
+`fi_crc32` (`hnsw.hpp:208`) is a **byte-at-a-time table-driven** CRC-32/ISO-HDLC — one table lookup
+and XOR per byte, with a loop-carried dependency on `crc`. Measured 1.53 ns/B ≈ 8.7 cycles/byte,
+which is what that formulation costs. It is the slowest common implementation, so the 224%/209%
+figures characterise *this* kernel, not on-access detection in general.
+
+| option | polynomial-compatible? | manifest change | extra memory | 96 B compute (projected) |
+|---|---|---|---|---|
+| PCLMULQDQ folding | ✅ same 0xEDB88320 | **none** — stays bit-identical to `zlib.crc32` | none (no table) | ~15–25 ns |
+| SSE4.2 `_mm_crc32_u64` | ❌ CRC32**C** (0x82F63B78) | new `algo` tag + regenerate | none (no table) | ~6–10 ns |
+| slicing-by-8 | ✅ same | none | +7 KB constant table | ~17 ns |
+
+The manifest header already reserves `u32 algo` at offset 12 (`ALGO_CRC32 = 1`), so a second
+algorithm was anticipated by the format. PCLMULQDQ is nonetheless the more attractive route: it
+keeps byte-identical compatibility with every frozen manifest and record, so nothing needs
+re-running.
+
+**But the ceiling is memory, not CRC.** Once the kernel is fast, what remains for `drop` is the
+1.98 MB/query of ex data it pulls in that the 1-bit traversal would never have touched. Projected
+(**not measured**): EB **+7.78% → ~1%** (its bytes are read anyway, so only compute remains, and
+it does only 771 checks); `drop` **+209.53% → ~40–70%**, bounded below by traffic that no CRC
+kernel can remove.
+
+So hardware CRC **makes the piggyback claim true for EB** and **does not rescue `drop`**. The
+structural fix for `drop` is the consult site (option B), not a faster kernel.
+
+### Not a legitimate optimization
+
+Memoizing verdicts across queries would eliminate nearly all of the cost — and would re-introduce
+precisely the staleness this branch exists to remove, since the fault model has errors accumulating
+during residency. `ex_corrupted_now()` says so at `hnsw.hpp:163`: *"Recomputed every call by
+design."* Within a single query there is nothing to memoize either: `drop` consults only *unvisited*
+neighbours, so each element is already checked at most once per query.
+
+## Consequence: EB dominates `drop` on every measured axis
+
+Worth stating plainly, because it is now a stronger claim than when only recall was on the table:
+
+| axis | `fallback_eb` | `drop` | source |
+|---|---|---|---|
+| recall, severe damage (384 flips/elem) | **0.81425** | 0.79597 | `expb_gates.json` gate 4 |
+| recall, light damage (4 flips/elem) | **0.81632** | 0.79739 | `expb_gates.json` gate 4 (informational) |
+| tolerable corruption f\* @ R≥0.90 | **0.1006** | 0.0926 | `frontier.csv` |
+| tolerable corruption f\* @ R≥0.60 | **0.4650** | 0.3995 | `frontier.csv` |
+| on-access detection cost | **+7.78%** | +209.53% | table above |
+
+Recall and f\* separated the two policies only modestly (`interval_ratio` 1.06–1.23). A **27×**
+cost axis does not. §3 can reasonably present EB as the recommended policy and `drop` as the
+ablation, rather than as two co-equal options.
+
 ## Wording fixes for §3 (suggestions for the writer; the draft is not edited here)
 
 1. §3.4 「零額外計算」 → 「無額外**記憶體流量**(CRC 算在 rerank 即將載入的同一批 bytes 上;
@@ -83,6 +229,13 @@ invalidate every frozen expb record. That is option B, ruled out this round.
    已由 `--lazy-gate` 量測,承載於 `frontier.csv` 的 `detect_pct_of_search_*` 欄位
    (EB 7.74 / drop 224.24)。兩者不可混用,也不可相加——摘要目前把「0.03–5.7%」講成
    「偵測層開銷」,那只是記憶體那一根軸,讀者會誤以為時間開銷也在該區間內。
+5. **記憶體那一根軸的上界要改**:5.7% 是 manifest 的**磁碟格式**(16 B/元素,含可推導的
+   off/len);偵測器**常駐**的只有 4 B/元素 = **1.43%**,即階梯上原本就寫著的「1.4%」那一階。
+   若講的是「必須與索引一起持久化的位元組」,5.7% 正確;若講的是「偵測層佔用的記憶體」,
+   應為 **0.03–1.4%**。換數字時務必說明換的是哪一個量。見「Manifest file format ≠ resident cost」。
+6. **成本數字要標明 CRC 核心**:現行 `fi_crc32` 是逐位元組查表(1.53 ns/B),+7.78% / +209.53%
+   是這個核心的成本,不是 on-access 偵測的固有成本。硬體 CRC 之後 EB 才真的接近零(~1%),
+   而 drop 仍有 ~40–70%(額外記憶體流量,推估)。**若 §3 要主張偵測便宜,必須綁定 EB 政策。**
 3. §3.1 描述 on-access 時,可加一句限定:兩種時機(載入期全掃 / access 時重算)在「查詢期
    記憶體不可變」下逐位元等價,而本文的 fault model 正是不可變假設不成立的場景——這是選擇
    on-access 的理由,不只是效率考量。

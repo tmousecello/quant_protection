@@ -70,7 +70,26 @@ fi
 # corruption detection (load_crc_manifest) feeding the same exp-3 fault hooks. Lives in THIS
 # repo ($QP_ROOT/rabitq_instrumentation, like exp_dumpids.cpp), not Samuel's $INSTR — it is
 # quant_protection's Stage 2 instrument.
-if ! grep -q "load_crc_manifest" "$LIB/include/rabitqlib/index/hnsw/hnsw.hpp" 2>/dev/null; then
+#
+# The sentinel must name the NEWEST symbol the patch adds, and the stale branch below is not
+# optional. A name-only "is it applied?" check on an OLD symbol silently skips an UPDATED
+# patch: step 1's `git checkout <pin>` is a no-op on an already-pinned tree and leaves the
+# modified header in place, so the tree keeps running code the patch has since replaced. That
+# is exactly how the ca59bf7 scan timer went uncompiled here for weeks. Note step 1 restores
+# pristine tracked files only when the pin CHANGES, so reverting the header is our job.
+HNSW_HPP="$LIB/include/rabitqlib/index/hnsw/hnsw.hpp"
+RECOVERY_SENTINEL="ex_corrupted_now"   # bump this to the newest symbol whenever the patch grows
+if ! grep -q "$RECOVERY_SENTINEL" "$HNSW_HPP" 2>/dev/null; then
+  if grep -q "load_crc_manifest" "$HNSW_HPP" 2>/dev/null; then
+    say "[2/7] STALE recovery patch in tree (no $RECOVERY_SENTINEL) — reverting header and re-applying both patches"
+    ( cd "$LIB" && git checkout -- include/rabitqlib/index/hnsw/hnsw.hpp ) \
+      || fail "could not revert hnsw.hpp to the pinned version"
+    # --include: library-changes.patch also carries a sample/CMakeLists.txt hunk that is still
+    # applied, and git apply is all-or-nothing — restrict it to the file we just reverted.
+    ( cd "$LIB" && git apply --include='include/rabitqlib/index/hnsw/hnsw.hpp' \
+        "$INSTR/library-changes.patch" ) \
+      || fail "library-changes.patch re-apply failed after revert"
+  fi
   say "[2/7] applying recovery-changes.patch (Option B)"
   ( cd "$LIB" && git apply "$QP_ROOT/rabitq_instrumentation/recovery-changes.patch" ) \
     || fail "recovery-changes.patch failed (it must apply on top of library-changes.patch)"
@@ -137,11 +156,12 @@ elif [ "$(uname)" = "Linux" ]; then
 fi
 
 # 4. BUILD ----------------------------------------------------------------
-# A cached exp_dumpids that predates --recovery (its usage line lacks the flag) was compiled
-# against the pre-Option-B header: delete it so the cache check below forces a full rebuild
-# (the header is shared, so ALL sample binaries must recompile against the patched hnsw.hpp).
-if [ -x "$BIN/exp_dumpids" ] && ! "$BIN/exp_dumpids" 2>&1 | grep -q -- "--recovery"; then
-  say "[4/7] exp_dumpids predates --recovery; forcing rebuild"
+# A cached exp_dumpids whose usage line lacks the newest flag was compiled against an older
+# header: delete it so the cache check below forces a full rebuild (the header is shared, so
+# ALL sample binaries must recompile against the patched hnsw.hpp). Bump the flag grepped here
+# alongside RECOVERY_SENTINEL above whenever the instrument grows one.
+if [ -x "$BIN/exp_dumpids" ] && ! "$BIN/exp_dumpids" 2>&1 | grep -q -- "--crc-mode"; then
+  say "[4/7] exp_dumpids predates --crc-mode; forcing rebuild"
   rm -f "$BIN/exp_dumpids"
 fi
 # Include exp_dumpids in the cache check so a stale build that predates it triggers a rebuild.

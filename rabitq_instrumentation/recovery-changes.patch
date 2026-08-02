@@ -1,5 +1,4 @@
 diff --git a/include/rabitqlib/index/hnsw/hnsw.hpp b/include/rabitqlib/index/hnsw/hnsw.hpp
-index 56e9a42..88c3d36 100644
 --- a/include/rabitqlib/index/hnsw/hnsw.hpp
 +++ b/include/rabitqlib/index/hnsw/hnsw.hpp
 @@ -6,6 +6,7 @@
@@ -10,19 +9,29 @@ index 56e9a42..88c3d36 100644
  #include <cstddef>
  #include <cstdlib>
  #include <fstream>
-@@ -95,6 +96,154 @@ class HierarchicalNSW {
+@@ -95,6 +96,255 @@
      [[nodiscard]] size_t fi_size_links0() const { return size_links_level0_; }
      [[nodiscard]] char* fi_level0() { return data_level0_memory_; }
  
 +    // ===== Option B: CRC-manifest-driven corruption detection (quant_protection) =====
 +    // Python (qp.rabitq.crc_manifest) CRCs each element's ex field of the CLEAN index
-+    // BEFORE injection; load_crc_manifest() re-CRCs the LOADED (possibly corrupted) bytes
-+    // against that manifest and fills ex_corrupt_ -- the same bitmap the FAULT_* search
-+    // hooks below already consume, so drop/fallback_eb keep Samuel's exp-3 semantics
-+    // byte-for-byte. The scan is EAGER (all elements once, at load): the index memory is
-+    // immutable during querying, so this is bit-for-bit equivalent to checking each
-+    // candidate's CRC right before its ex chunk is read, at zero query-path cost.
-+    // C++ NEVER injects; it only detects (injection's single source of truth is qp.faults).
++    // BEFORE injection; load_crc_manifest() parses that manifest and arms `policy`, then the
++    // FAULT_* search hooks below consult it -- so drop/fallback_eb keep Samuel's exp-3
++    // semantics byte-for-byte. C++ NEVER injects; it only detects (injection's single source
++    // of truth is qp.faults).
++    //
++    // TWO CRC MODES, same verdict, different moment (--crc-mode):
++    //   load : EAGER -- CRC every element once at load, cache the verdicts in ex_corrupt_.
++    //          Cheap on the query path (a byte lookup) but its equivalence to on-access
++    //          checking assumes the index memory is immutable while queries run.
++    //   lazy : ON-ACCESS -- keep only the expected CRCs (fi_crc_expect_) and recompute an
++    //          element's CRC at the moment the search consults it. This is what the paper's
++    //          Sec 3.1/3.3 describes (piggyback detection on the rerank read), and it does
++    //          NOT assume immutability, which matters because the fault model has errors
++    //          accumulating during residency.
++    // Under an immutable-during-query index the two modes are bit-for-bit identical (same
++    // predicate, same decision points) -- that equivalence is an acceptance gate, not an
++    // assumption: phase3_expb_recovery.py --lazy-gate asserts the top-k ids match exactly.
 +    //
 +    // EB-fallback dependency (stage2_cpp_patch.md rule 3): FAULT_FALLBACK_EB ranks a
 +    // corrupt vector via the 1-bit estimate from bin_code + bin_factors (f_error), which
@@ -30,21 +39,86 @@ index 56e9a42..88c3d36 100644
 +    // When a future experiment corrupts bin/factors too, THIS is the first place to change
 +    // (the manifest field window below is pinned inside the ex block for that reason).
 +    bool fi_crc_mode_ = false;
++    bool fi_crc_lazy_ = false;   // false = load (eager scan), true = lazy (on-access)
++    bool fi_crc_timer_ = false;  // time each on-access CRC (see fi_qstats_.crc_ns)
 +    size_t fi_crc_checked_ = 0;  // load-time scan: elements CRC-verified
 +    size_t fi_crc_failed_ = 0;   // load-time scan: elements whose ex bytes mismatched
 +    // Wall time of the eager scan LOOP only -- manifest open/header/entry-array read are
 +    // excluded, so crc_scan_ns / elements_checked is the per-vector CRC cost the E7
 +    // microbench divides by the per-consult distance cost. steady_clock (monotonic, immune
 +    // to wall-clock steps); the clock is read TWICE per load, never on the query path.
++    // ALL THREE are 0 under --crc-mode lazy: no scan ran, so there is nothing to report.
 +    uint64_t fi_crc_scan_ns_ = 0;
++    // Lazy-mode state. The expect table replaces the eager scan's verdict bitmap: 4 B per
++    // element (4 MB at 1M) instead of 1 B, in exchange for not touching a single ex byte at
++    // load. field_off/field_len were locals of load_crc_manifest() and must survive it.
++    std::vector<uint32_t> fi_crc_expect_;
++    size_t fi_crc_field_off_ = 0;
++    size_t fi_crc_field_len_ = 0;
++    // Stats only: which elements have EVER failed an on-access check in this process. Never
++    // read by any decision -- it exists so the acceptance gate can compare lazy's distinct
++    // failure count against load's whole-index count. Deliberately NOT a verdict cache:
++    // memoizing would make the measured detection overhead a best case instead of the
++    // worst-case cold path we want to report.
++    std::vector<uint8_t> fi_crc_seen_fail_;
++    size_t fi_crc_distinct_failed_ = 0;
 +    struct FiQueryStats {        // per-query recovery counters (single-thread search only;
 +        uint64_t consults = 0;   //   caller resets between queries via fi_reset_query_stats)
 +        uint64_t corrupt_hits = 0;
 +        uint64_t fallbacks = 0;  // candidates ranked by the EB pessimistic bound
 +        uint64_t drops = 0;      // candidates skipped under FAULT_DROP
++        // --crc-mode lazy only (all stay 0 under load: the query path computes no CRC).
++        uint64_t crc_checks = 0;      // on-access CRCs computed
++        uint64_t crc_bytes = 0;       // bytes fed to those CRCs
++        uint64_t crc_ns = 0;          // time inside them, iff fi_crc_timer_ (else 0)
++        uint64_t crc_oob_skipped = 0; // consults with an out-of-range id (see below)
 +    };
 +    FiQueryStats fi_qstats_;
 +    void fi_reset_query_stats() { fi_qstats_ = FiQueryStats{}; }
++
++    // On-access CRC of one element's ex window, against the manifest's expected value.
++    // Recomputed every call by design (see fi_crc_seen_fail_ above on why not memoized).
++    [[nodiscard]] inline bool ex_corrupted_now(PID id) {
++        // Bounds guard. The FAULT_DROP consult sits BEFORE the fi_safe_mode_ bounds check, so
++        // a structurally-corrupt neighbour id can reach here. In load mode that is a 1-byte
++        // read past ex_corrupt_; in lazy mode it would be a 96-byte read at a wild address.
++        // Report it as a counter and treat the element as intact -- never silently.
++        if (static_cast<size_t>(id) >= static_cast<size_t>(cur_element_count_)) {
++            fi_qstats_.crc_oob_skipped++;
++            return false;
++        }
++        const char* ex = data_level0_memory_ +
++                         (static_cast<size_t>(id) * size_data_per_element_) + fi_crc_field_off_;
++        fi_qstats_.crc_checks++;
++        fi_qstats_.crc_bytes += fi_crc_field_len_;
++        uint32_t got = 0;
++        if (fi_crc_timer_) {
++            // Opt-in: two steady_clock reads (~40-50 ns) against a ~96-byte software CRC
++            // (~100-200 ns) inflate the very number being measured, and would also pollute
++            // exp_dumpids' search_wall_ns -- which is the unperturbed load-vs-lazy delta the
++            // acceptance run quotes as the headline overhead. Off by default for that reason.
++            const auto t0 = std::chrono::steady_clock::now();
++            got = fi_crc32(ex, fi_crc_field_len_);
++            fi_qstats_.crc_ns += static_cast<uint64_t>(
++                std::chrono::duration_cast<std::chrono::nanoseconds>(
++                    std::chrono::steady_clock::now() - t0)
++                    .count());
++        } else {
++            got = fi_crc32(ex, fi_crc_field_len_);
++        }
++        const bool bad = (got != fi_crc_expect_[id]);
++        if (bad && fi_crc_seen_fail_[id] == 0) {
++            fi_crc_seen_fail_[id] = 1;
++            fi_crc_distinct_failed_++;
++        }
++        return bad;
++    }
++
++    // The ONLY place the two modes diverge. Same predicate, same call sites, same decisions:
++    // load answers from the bitmap the eager scan filled, lazy computes the answer now.
++    [[nodiscard]] inline bool ex_bad(PID id) {
++        return fi_crc_lazy_ ? ex_corrupted_now(id) : ex_corrupted(id);
++    }
 +
 +    // CRC-32/ISO-HDLC (poly 0xEDB88320 reflected, init/final-xor 0xFFFFFFFF) == zlib.crc32,
 +    // the exact algorithm the Python manifest writer uses (manifest algo tag 1).
@@ -68,11 +142,15 @@ index 56e9a42..88c3d36 100644
 +    }
 +
 +    // Load a qp CRC manifest (crc_manifest.py: 64-B header + n x {u64 off, u32 len, u32 crc},
-+    // little-endian) and eagerly verify every element's ex bytes, then arm `policy`
-+    // (FAULT_DROP or FAULT_FALLBACK_EB). Call AFTER load(). Throws on any header/geometry
-+    // mismatch -- pairing the wrong manifest with the wrong index must fail loudly, not skew
-+    // results silently.
-+    void load_crc_manifest(const char* path, int policy) {
++    // little-endian) and arm `policy` (FAULT_DROP or FAULT_FALLBACK_EB). Call AFTER load().
++    // Throws on any header/geometry mismatch -- pairing the wrong manifest with the wrong
++    // index must fail loudly, not skew results silently.
++    //
++    // PARSE (both modes): header, geometry echo, entry-array read, and the per-entry
++    // offset/len re-derivation. ARM: `lazy=false` runs the eager scan exactly as before and
++    // fills ex_corrupt_; `lazy=true` keeps the expected CRCs instead and touches no ex byte
++    // until the search consults an element.
++    void load_crc_manifest(const char* path, int policy, bool lazy = false) {
 +        // Self-test the CRC kernel before trusting a 10^6-element scan to it.
 +        if (fi_crc32("123456789", 9) != 0xCBF43926U) {
 +            throw std::runtime_error("fi_crc32 self-test failed");
@@ -138,26 +216,48 @@ index 56e9a42..88c3d36 100644
 +        ex_corrupt_.assign(cur_element_count_, 0);
 +        fi_crc_checked_ = 0;
 +        fi_crc_failed_ = 0;
-+        const auto scan_t0 = std::chrono::steady_clock::now();
++        fi_crc_scan_ns_ = 0;
++        fi_crc_lazy_ = lazy;
++        fi_crc_field_off_ = static_cast<size_t>(field_off);
++        fi_crc_field_len_ = static_cast<size_t>(field_len);
++        fi_crc_expect_.clear();
++        fi_crc_seen_fail_.clear();
++        fi_crc_distinct_failed_ = 0;
++        if (lazy) {
++            fi_crc_expect_.resize(n_entries);
++            fi_crc_seen_fail_.assign(cur_element_count_, 0);
++        }
++        // Entry geometry re-derivation -- integer-only, touches no ex byte, so it runs in
++        // both modes and (unlike before) sits OUTSIDE the eager scan's timer. That makes
++        // crc_scan_ns a pure CRC cost; the shift is ~2 integer compares per element against
++        // a 96-byte CRC, i.e. far below the measurement's own noise.
 +        for (uint64_t i = 0; i < n_entries; i++) {
 +            if (entries[i].off != level0_start + i * spe + field_off ||
 +                entries[i].len != field_len) {
 +                throw std::runtime_error("CRC manifest entry offset/len mismatch");
 +            }
-+            // The on-disk LEVEL0 block is a verbatim copy of data_level0_memory_, so the
-+            // in-memory bytes at the same per-element offset are the bytes the manifest
-+            // CRC'd on disk (offsets within an element are identical).
-+            const char* ex = data_level0_memory_ + i * size_data_per_element_ + field_off;
-+            fi_crc_checked_++;
-+            if (fi_crc32(ex, field_len) != entries[i].crc) {
-+                ex_corrupt_[i] = 1;
-+                fi_crc_failed_++;
++            if (lazy) {
++                fi_crc_expect_[i] = entries[i].crc;
 +            }
 +        }
-+        fi_crc_scan_ns_ = static_cast<uint64_t>(
-+            std::chrono::duration_cast<std::chrono::nanoseconds>(
-+                std::chrono::steady_clock::now() - scan_t0)
-+                .count());
++        if (!lazy) {
++            const auto scan_t0 = std::chrono::steady_clock::now();
++            for (uint64_t i = 0; i < n_entries; i++) {
++                // The on-disk LEVEL0 block is a verbatim copy of data_level0_memory_, so the
++                // in-memory bytes at the same per-element offset are the bytes the manifest
++                // CRC'd on disk (offsets within an element are identical).
++                const char* ex = data_level0_memory_ + i * size_data_per_element_ + field_off;
++                fi_crc_checked_++;
++                if (fi_crc32(ex, field_len) != entries[i].crc) {
++                    ex_corrupt_[i] = 1;
++                    fi_crc_failed_++;
++                }
++            }
++            fi_crc_scan_ns_ = static_cast<uint64_t>(
++                std::chrono::duration_cast<std::chrono::nanoseconds>(
++                    std::chrono::steady_clock::now() - scan_t0)
++                    .count());
++        }
 +        fault_policy_ = policy;
 +        fi_crc_mode_ = true;
 +    }
@@ -165,16 +265,21 @@ index 56e9a42..88c3d36 100644
      struct ResultRecord {
          float est_dist;
          float low_dist;
-@@ -1278,8 +1427,14 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
+@@ -1278,8 +1528,19 @@
  
              // Fault injection: a CRC-detected ex corruption under FAULT_DROP removes the
              // node entirely (no result, no routing) -- the "detect & skip" baseline.
 -            if (fault_policy_ == FAULT_DROP && ex_corrupted(candidate_id)) {
 -                continue;
 +            // (Counters only; the skip decision is Samuel's unchanged exp-3 semantics.)
++            // NOTE for the piggyback claim: this consult happens for EVERY unvisited
++            // neighbour, before the bounds guard and before any ex read -- and a dropped node
++            // never reads its ex block at all. So under --crc-mode lazy the FAULT_DROP path
++            // pays real extra memory traffic; only the EB path below is genuine piggyback
++            // (its CRC covers exactly the bytes get_full_est is about to load).
 +            if (fault_policy_ == FAULT_DROP) {
 +                fi_qstats_.consults++;
-+                if (ex_corrupted(candidate_id)) {
++                if (ex_bad(candidate_id)) {
 +                    fi_qstats_.corrupt_hits++;
 +                    fi_qstats_.drops++;
 +                    continue;
@@ -182,17 +287,34 @@ index 56e9a42..88c3d36 100644
              }
  
              // Bounds-check guard: convert a structurally-invalid id (which would otherwise
-@@ -1313,9 +1468,15 @@ void HierarchicalNSW::searchBaseLayerST_AdaptiveRerankOpt(
+@@ -1304,18 +1565,31 @@
+             if (flag_update_KNNs) {
+                 // Compute the full estimate if promising. Under FAULT_FALLBACK(_EB) a corrupted
+                 // vector skips this upgrade and keeps its 1-bit (bin-only) estimate.
++                // This is the true on-access point: the verdict decides whether the ex block
++                // is read at all, so under --crc-mode lazy the CRC runs over exactly the bytes
++                // get_full_est would otherwise load next.
+                 bool fb_corrupt =
+                     (fault_policy_ == FAULT_FALLBACK || fault_policy_ == FAULT_FALLBACK_EB) &&
+-                    ex_corrupted(candidate_id);
++                    ex_bad(candidate_id);
+                 if (ex_bits_ > 0 && !fb_corrupt) {
+                     get_full_est(q_to_centroids, query_wrapper, candidate_id, candest);
+                 }
                  // Error-bound-aware fallback: rank a corrupted vector by its pessimistic
                  // upper-bound distance (est + (est - low)) so its coarse 1-bit estimate
                  // cannot create a false positive that evicts a true neighbour.
 +                // (Counters only; the formula is Samuel's unchanged exp-3 semantics.)
++                // Reuses fb_corrupt rather than re-evaluating the predicate: under
++                // FAULT_FALLBACK_EB the short-circuit above makes it identical to
++                // ex_bad(candidate_id), so this is bit-equivalent -- and it keeps lazy mode
++                // at ONE CRC per candidate instead of double-counting the same bytes.
                  float rank_dist = candest.est_dist;
 -                if (fault_policy_ == FAULT_FALLBACK_EB && ex_corrupted(candidate_id)) {
 -                    rank_dist = candest.est_dist + (candest.est_dist - candest.low_dist);
 +                if (fault_policy_ == FAULT_FALLBACK_EB) {
 +                    fi_qstats_.consults++;
-+                    if (ex_corrupted(candidate_id)) {
++                    if (fb_corrupt) {
 +                        fi_qstats_.corrupt_hits++;
 +                        fi_qstats_.fallbacks++;
 +                        rank_dist = candest.est_dist + (candest.est_dist - candest.low_dist);

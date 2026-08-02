@@ -19,15 +19,26 @@
 // The stdout RECALL line is for adapter parity only — the AUTHORITATIVE recall is recomputed
 // in Python by qp.metrics from the dumped ids (hard rule #2).
 //
+//
+// --crc-mode selects WHEN the CRC is computed, not what it decides:
+//   load : eager whole-index scan at load (the original behaviour, still the default).
+//   lazy : on-access — recompute an element's CRC at the moment the search consults it.
+//          This is the mode the paper's Sec 3.1/3.3 describes; it drops the "index memory is
+//          immutable while queries run" assumption that makes the eager scan equivalent.
+// Both modes use the same predicate at the same decision points, so on an index that does not
+// change during the run they must return bit-identical ids — that is an acceptance gate
+// (phase3_expb_recovery.py --lazy-gate), not an assumption.
+//
 // Usage: exp_dumpids <index> <query.fvecs> <gt.ivecs> <l2|ip> <ef> <out.ivecs> [topk=10]
 //                    [--recovery none|drop|fallback_eb] [--crc-manifest <path>]
-//                    [--stats-json <path>]
+//                    [--stats-json <path>] [--crc-mode load|lazy] [--crc-timer]
 //   stdout: "RECALL\t<recall@topk>" (C++-side recall on the dumped ids, for parity)
 //   out.ivecs: nq rows, each = [uint32 topk][topk * uint32 id]; matches qp.data.read_ivecs.
 //              short rows (possible under --recovery drop at high corruption) are padded with
 //              0xFFFFFFFF (-1), which qp.metrics treats as a non-matching id.
-//   stats json (when --stats-json): load-time CRC scan totals + per-query recovery counters
-//              (consults / corrupt_hits / fallbacks / drops) + the two E7-microbench timers,
+//   stats json (when --stats-json): crc_mode + load-time CRC scan totals + per-query recovery
+//              counters (consults / corrupt_hits / fallbacks / drops) + the "crc" block
+//              (on-access check/byte/ns totals, lazy mode only) + the two E7-microbench timers,
 //              load.crc_scan_ns (the eager CRC loop, hnsw.hpp) and search_wall_ns (this file:
 //              the per-query hnsw.search calls only, no IO/recall/JSON). Dividing each by its
 //              own count -- crc_scan_ns/load.elements_checked vs search_wall_ns/
@@ -63,7 +74,8 @@ static void usage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <index> <query.fvecs> <gt.ivecs> <l2|ip> <ef> <out.ivecs> [topk=10]\n"
               << "       [--recovery none|drop|fallback_eb] [--crc-manifest <path>]"
-              << " [--stats-json <path>]\n";
+              << " [--stats-json <path>]\n"
+              << "       [--crc-mode load|lazy] [--crc-timer]\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -91,6 +103,8 @@ int main(int argc, char* argv[]) {
     std::string recovery = "none";
     std::string manifest_path;
     std::string stats_path;
+    std::string crc_mode = "load";
+    bool crc_timer = false;
     for (; argi < argc; argi++) {
         std::string a(argv[argi]);
         if (a == "--recovery" && argi + 1 < argc) {
@@ -99,6 +113,10 @@ int main(int argc, char* argv[]) {
             manifest_path = argv[++argi];
         } else if (a == "--stats-json" && argi + 1 < argc) {
             stats_path = argv[++argi];
+        } else if (a == "--crc-mode" && argi + 1 < argc) {
+            crc_mode = argv[++argi];
+        } else if (a == "--crc-timer") {
+            crc_timer = true;
         } else {
             std::cerr << "unknown/incomplete arg: " << a << '\n';
             usage(argv[0]);
@@ -112,6 +130,18 @@ int main(int argc, char* argv[]) {
     }
     if (recovery != "none" && manifest_path.empty()) {
         std::cerr << "--recovery " << recovery << " requires --crc-manifest\n";
+        usage(argv[0]);
+        return 1;
+    }
+    if (crc_mode != "load" && crc_mode != "lazy") {
+        std::cerr << "bad --crc-mode " << crc_mode << " (expected load|lazy)\n";
+        usage(argv[0]);
+        return 1;
+    }
+    // --recovery none loads no manifest and checks no CRC at all, so "when" is meaningless
+    // there. Reject rather than silently reporting crc_mode=lazy on a run that never CRC'd.
+    if (recovery == "none" && (crc_mode != "load" || crc_timer)) {
+        std::cerr << "--recovery none never checks a CRC; --crc-mode/--crc-timer do not apply\n";
         usage(argv[0]);
         return 1;
     }
@@ -129,10 +159,12 @@ int main(int argc, char* argv[]) {
     index_type hnsw;
     hnsw.load(index_file, metric_type);
 
+    const bool crc_lazy = (crc_mode == "lazy");
+    hnsw.fi_crc_timer_ = crc_timer;
     if (recovery == "drop") {
-        hnsw.load_crc_manifest(manifest_path.c_str(), index_type::FAULT_DROP);
+        hnsw.load_crc_manifest(manifest_path.c_str(), index_type::FAULT_DROP, crc_lazy);
     } else if (recovery == "fallback_eb") {
-        hnsw.load_crc_manifest(manifest_path.c_str(), index_type::FAULT_FALLBACK_EB);
+        hnsw.load_crc_manifest(manifest_path.c_str(), index_type::FAULT_FALLBACK_EB, crc_lazy);
     }
     // recovery == "none": no manifest load, fault_policy_ stays FAULT_NONE — no CRC check,
     // the (possibly corrupted) ex codes are consumed exactly as Stage 0 did.
@@ -148,6 +180,11 @@ int main(int argc, char* argv[]) {
     uint64_t tot_corrupt = 0;
     uint64_t tot_fallbacks = 0;
     uint64_t tot_drops = 0;
+    // On-access CRC totals (all stay 0 under --crc-mode load: the query path computes no CRC).
+    uint64_t tot_crc_checks = 0;
+    uint64_t tot_crc_bytes = 0;
+    uint64_t tot_crc_ns = 0;
+    uint64_t tot_crc_oob = 0;
     // Search-only wall time: the clock brackets the hnsw.search call and nothing else (no
     // counter reads, no result move, no IO), accumulated over all nq queries. Two
     // steady_clock reads per query against a ~ms-scale ef=2000 search is noise-level
@@ -168,6 +205,10 @@ int main(int argc, char* argv[]) {
         tot_corrupt += s.corrupt_hits;
         tot_fallbacks += s.fallbacks;
         tot_drops += s.drops;
+        tot_crc_checks += s.crc_checks;
+        tot_crc_bytes += s.crc_bytes;
+        tot_crc_ns += s.crc_ns;
+        tot_crc_oob += s.crc_oob_skipped;
     }
 
     // Write ivecs: fixed topk-width rows so qp.data.read_ivecs reshapes cleanly.
@@ -214,11 +255,27 @@ int main(int argc, char* argv[]) {
            << "  \"ef\": " << ef << ",\n"
            << "  \"topk\": " << topk << ",\n"
            << "  \"nq\": " << nq << ",\n"
-           // The load.* trio is all zero under --recovery none: no manifest is loaded, so
-           // there is nothing to check and no scan to time.
+           << "  \"crc_mode\": \"" << crc_mode << "\",\n"
+           // The load.* trio is all zero under --recovery none (no manifest is loaded, so
+           // there is nothing to check and no scan to time) AND under --crc-mode lazy (no
+           // scan ran). Consumers that read elements_crc_fail as a whole-index corruption
+           // count -- phase3_g_detection, phase3_e7_episode -- must gate on crc_mode.
            << "  \"load\": {\"elements_checked\": " << hnsw.fi_crc_checked_
            << ", \"elements_crc_fail\": " << hnsw.fi_crc_failed_
            << ", \"crc_scan_ns\": " << hnsw.fi_crc_scan_ns_ << "},\n"
+           // On-access detection totals, --crc-mode lazy only. `ns` is 0 unless --crc-timer:
+           // two steady_clock reads around a ~96-byte software CRC inflate it by tens of
+           // percent AND perturb search_wall_ns, which is the unperturbed load-vs-lazy delta
+           // the acceptance run quotes. distinct_elements_failed counts elements that ever
+           // failed a check (a stats-only set, never consulted by a decision), so it is
+           // directly comparable to load mode's elements_crc_fail; checks/bytes count every
+           // recomputation because the cost being measured is the recomputation.
+           << "  \"crc\": {\"checks\": " << tot_crc_checks
+           << ", \"bytes\": " << tot_crc_bytes
+           << ", \"ns\": " << tot_crc_ns
+           << ", \"oob_skipped\": " << tot_crc_oob
+           << ", \"timer_enabled\": " << (crc_timer ? "true" : "false")
+           << ", \"distinct_elements_failed\": " << hnsw.fi_crc_distinct_failed_ << "},\n"
            << "  \"search_wall_ns\": " << search_wall_ns << ",\n"
            << "  \"totals\": {\"consults\": " << tot_consults
            << ", \"corrupt_hits\": " << tot_corrupt

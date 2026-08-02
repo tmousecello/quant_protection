@@ -75,7 +75,8 @@ static void usage(const char* prog) {
               << " <index> <query.fvecs> <gt.ivecs> <l2|ip> <ef> <out.ivecs> [topk=10]\n"
               << "       [--recovery none|drop|fallback_eb] [--crc-manifest <path>]"
               << " [--stats-json <path>]\n"
-              << "       [--crc-mode load|lazy] [--crc-timer]\n";
+              << "       [--crc-mode load|lazy] [--crc-timer]"
+              << " [--crc-impl table|slice8|clmul]\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -104,6 +105,7 @@ int main(int argc, char* argv[]) {
     std::string manifest_path;
     std::string stats_path;
     std::string crc_mode = "load";
+    std::string crc_impl = "table";
     bool crc_timer = false;
     for (; argi < argc; argi++) {
         std::string a(argv[argi]);
@@ -115,6 +117,8 @@ int main(int argc, char* argv[]) {
             stats_path = argv[++argi];
         } else if (a == "--crc-mode" && argi + 1 < argc) {
             crc_mode = argv[++argi];
+        } else if (a == "--crc-impl" && argi + 1 < argc) {
+            crc_impl = argv[++argi];
         } else if (a == "--crc-timer") {
             crc_timer = true;
         } else {
@@ -138,10 +142,25 @@ int main(int argc, char* argv[]) {
         usage(argv[0]);
         return 1;
     }
-    // --recovery none loads no manifest and checks no CRC at all, so "when" is meaningless
-    // there. Reject rather than silently reporting crc_mode=lazy on a run that never CRC'd.
-    if (recovery == "none" && (crc_mode != "load" || crc_timer)) {
-        std::cerr << "--recovery none never checks a CRC; --crc-mode/--crc-timer do not apply\n";
+    // A mistyped --crc-impl must report-and-stop, never silently fall back to `table` -- that
+    // would quietly benchmark the wrong kernel and report the name you asked for.
+    const int crc_impl_id = qp_crc::impl_from_name(crc_impl.c_str());
+    if (crc_impl_id < 0) {
+        std::cerr << "bad --crc-impl " << crc_impl << " (expected table|slice8|clmul)\n";
+        usage(argv[0]);
+        return 1;
+    }
+    if (!qp_crc::impl_available(crc_impl_id)) {
+        std::cerr << "--crc-impl " << crc_impl << " was not compiled in (missing __PCLMUL__); "
+                  << "rebuild with -march=native\n";
+        return 1;
+    }
+    // --recovery none loads no manifest and checks no CRC at all, so "when" and "how" are both
+    // meaningless there. Reject rather than silently reporting a crc_mode/crc_impl on a run
+    // that never CRC'd a single byte.
+    if (recovery == "none" && (crc_mode != "load" || crc_timer || crc_impl != "table")) {
+        std::cerr << "--recovery none never checks a CRC; "
+                  << "--crc-mode/--crc-timer/--crc-impl do not apply\n";
         usage(argv[0]);
         return 1;
     }
@@ -161,6 +180,12 @@ int main(int argc, char* argv[]) {
 
     const bool crc_lazy = (crc_mode == "lazy");
     hnsw.fi_crc_timer_ = crc_timer;
+    // Must be set BEFORE load_crc_manifest: the loader self-tests the selected kernel, and the
+    // eager scan uses it for all 10^6 elements. Assigning a member that only the updated
+    // hnsw.hpp has is also the tripwire for a stale patch -- if build_rabitq.sh's sentinel was
+    // not bumped, this line fails to COMPILE rather than silently running the old kernel while
+    // the stats JSON reports the impl you asked for.
+    hnsw.fi_crc_impl_ = crc_impl_id;
     if (recovery == "drop") {
         hnsw.load_crc_manifest(manifest_path.c_str(), index_type::FAULT_DROP, crc_lazy);
     } else if (recovery == "fallback_eb") {
@@ -256,6 +281,9 @@ int main(int argc, char* argv[]) {
            << "  \"topk\": " << topk << ",\n"
            << "  \"nq\": " << nq << ",\n"
            << "  \"crc_mode\": \"" << crc_mode << "\",\n"
+           // Echoed from the id the index was actually configured with, not from the argv
+           // string, so a run can never report a kernel it did not use.
+           << "  \"crc_impl\": \"" << qp_crc::impl_name(hnsw.fi_crc_impl_) << "\",\n"
            // The load.* trio is all zero under --recovery none (no manifest is loaded, so
            // there is nothing to check and no scan to time) AND under --crc-mode lazy (no
            // scan ran). Consumers that read elements_crc_fail as a whole-index corruption

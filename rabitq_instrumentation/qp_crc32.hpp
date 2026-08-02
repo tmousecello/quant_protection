@@ -193,7 +193,11 @@ inline uint32_t crc32_clmul(const void* data, size_t n) {
     return crc ^ 0xFFFFFFFFU;
 }
 #else
-inline uint32_t crc32_clmul(const void* data, size_t n) { return crc32_table(data, n); }
+// Fall back to slice8, not table: if a build ever lands without PCLMUL, the sensible floor is
+// the fastest portable kernel (6.3x table on the load scan), not the slowest one. In practice
+// unreachable here -- exp_dumpids report-and-stops on an unavailable impl, and the deployment
+// target already requires AVX512BW, a strict superset of PCLMUL.
+inline uint32_t crc32_clmul(const void* data, size_t n) { return crc32_slice8(data, n); }
 #endif
 
 // ---------------------------------------------------------------------------

@@ -238,6 +238,52 @@ def test_stub_crc_mode_passthrough(clean_setup):
         adapter.query_with_recovery(clean_f, "none", None, crc_mode="lazy")
 
 
+def test_stub_crc_impl_passthrough(clean_setup):
+    """The kernel selector must reach the adapter, be echoed, and change nothing observable.
+
+    Selecting a CRC kernel is a pure speed knob: every impl is bit-identical to zlib.crc32
+    (test_crc_kernel.py proves that against zlib directly), so ids, recall and every counter
+    must be untouched. A kernel that changed any of them would be a bug, and one that silently
+    fell back to `table` would make a benchmark report the wrong thing -- hence the strict
+    rejection of unknown names rather than a default.
+    """
+    buf, rmap, mf, tmp_path = clean_setup
+    clean_f = str(tmp_path / "clean.index")
+    buf.tofile(clean_f)
+
+    base = adapter.query_with_recovery(clean_f, "fallback_eb", mf)
+    # The DRIVERS default to the fast kernel; the BINARY still defaults to "table" so a bare
+    # command line stays backward compatible. Those differ on purpose, which is exactly why
+    # adapter.query_with_recovery always passes --crc-impl explicitly rather than omitting it
+    # when it matches its own default.
+    assert base["stats"]["crc_impl"] == adapter.DEFAULT_CRC_IMPL == "clmul"
+    for impl in ("table", "slice8", "clmul"):
+        got = adapter.query_with_recovery(clean_f, "fallback_eb", mf, crc_impl=impl)
+        assert got["stats"]["crc_impl"] == impl
+        assert np.array_equal(got["ids"], base["ids"]), f"{impl} changed the ids"
+        assert got["stats"]["crc"]["checks"] == base["stats"]["crc"]["checks"]
+
+    # Composes with crc_mode: the two knobs are independent (WHEN vs HOW).
+    both = adapter.query_with_recovery(clean_f, "fallback_eb", mf,
+                                       crc_mode="lazy", crc_impl="clmul")
+    assert (both["stats"]["crc_mode"], both["stats"]["crc_impl"]) == ("lazy", "clmul")
+
+    # A typo must report-and-stop, never quietly measure the default kernel.
+    with pytest.raises(ValueError):
+        adapter.query_with_recovery(clean_f, "fallback_eb", mf, crc_impl="pclmul")
+    # recovery=none never CRCs, so "how" is as meaningless as "when".
+    with pytest.raises(ValueError):
+        adapter.query_with_recovery(clean_f, "none", None, crc_impl="clmul")
+
+
+def test_stub_and_real_adapter_agree_on_impl_names():
+    """The stub's whitelist is duplicated, not imported — so pin it to the real one here."""
+    from qp.rabitq import stub_adapter
+    real = pytest.importorskip("qp.rabitq.adapter")
+    assert stub_adapter.CRC_IMPLS == real.CRC_IMPLS
+    assert stub_adapter.DEFAULT_CRC_IMPL == real.DEFAULT_CRC_IMPL
+
+
 def test_crc_fail_count_check_is_mode_aware():
     """load pins the exact count; lazy bounds it — and 0 must still FAIL (not a tautology)."""
     def row(load_fail=None, distinct=None):

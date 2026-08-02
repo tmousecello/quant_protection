@@ -9,7 +9,15 @@ diff --git a/include/rabitqlib/index/hnsw/hnsw.hpp b/include/rabitqlib/index/hns
  #include <cstddef>
  #include <cstdlib>
  #include <fstream>
-@@ -95,6 +96,255 @@
+@@ -19,6 +20,7 @@
+ #include "rabitqlib/index/estimator.hpp"
+ #include "rabitqlib/index/ivf/initializer.hpp"
+ #include "rabitqlib/index/query.hpp"
++#include "rabitqlib/qp_crc32.hpp"  // quant_protection: swappable CRC kernels (table/slice8/clmul)
+ #include "rabitqlib/quantization/data_layout.hpp"
+ #include "rabitqlib/quantization/rabitq.hpp"
+ #include "rabitqlib/utils/buffer.hpp"
+@@ -95,6 +97,254 @@
      [[nodiscard]] size_t fi_size_links0() const { return size_links_level0_; }
      [[nodiscard]] char* fi_level0() { return data_level0_memory_; }
  
@@ -122,23 +130,17 @@ diff --git a/include/rabitqlib/index/hnsw/hnsw.hpp b/include/rabitqlib/index/hns
 +
 +    // CRC-32/ISO-HDLC (poly 0xEDB88320 reflected, init/final-xor 0xFFFFFFFF) == zlib.crc32,
 +    // the exact algorithm the Python manifest writer uses (manifest algo tag 1).
-+    static uint32_t fi_crc32(const char* data, size_t n) {
-+        static const std::vector<uint32_t> table = [] {
-+            std::vector<uint32_t> t(256);
-+            for (uint32_t i = 0; i < 256; i++) {
-+                uint32_t c = i;
-+                for (int k = 0; k < 8; k++) {
-+                    c = ((c & 1U) != 0) ? 0xEDB88320U ^ (c >> 1) : c >> 1;
-+                }
-+                t[i] = c;
-+            }
-+            return t;
-+        }();
-+        uint32_t crc = 0xFFFFFFFFU;
-+        for (size_t i = 0; i < n; i++) {
-+            crc = table[(crc ^ static_cast<unsigned char>(data[i])) & 0xFFU] ^ (crc >> 8);
-+        }
-+        return crc ^ 0xFFFFFFFFU;
++    //
++    // The kernel is selected at load time via fi_crc_impl_ (rabitqlib/qp_crc32.hpp). Every impl
++    // is bit-identical to zlib.crc32 -- proven exhaustively by
++    // artifacts/phase3/tests/test_crc_kernel.py -- so this selects SPEED ONLY and can never
++    // change a verdict, an id, or a recall. That is what makes the kernel swap a no-op for every
++    // frozen manifest and expb record. A member rather than a static so the four existing call
++    // sites are untouched; the original byte-at-a-time loop lives on as qp_crc::kTable.
++    int fi_crc_impl_ = qp_crc::kTable;
++
++    [[nodiscard]] uint32_t fi_crc32(const char* data, size_t n) const {
++        return qp_crc::crc32(fi_crc_impl_, data, n);
 +    }
 +
 +    // Load a qp CRC manifest (crc_manifest.py: 64-B header + n x {u64 off, u32 len, u32 crc},
@@ -151,9 +153,14 @@ diff --git a/include/rabitqlib/index/hnsw/hnsw.hpp b/include/rabitqlib/index/hns
 +    // fills ex_corrupt_; `lazy=true` keeps the expected CRCs instead and touches no ex byte
 +    // until the search consults an element.
 +    void load_crc_manifest(const char* path, int policy, bool lazy = false) {
-+        // Self-test the CRC kernel before trusting a 10^6-element scan to it.
++        // Self-test the SELECTED CRC kernel before trusting a 10^6-element scan to it. Naming
++        // the impl matters: a kernel that is wrong rather than merely slow would flag every
++        // element, which downstream reads as "the index is entirely corrupt" rather than as a
++        // build problem. Note 9 bytes takes the scalar path in every impl, so this also pins
++        // the sub-fold tail that the 96-byte production window never exercises.
 +        if (fi_crc32("123456789", 9) != 0xCBF43926U) {
-+            throw std::runtime_error("fi_crc32 self-test failed");
++            throw std::runtime_error(std::string("fi_crc32 self-test failed for impl '") +
++                                     qp_crc::impl_name(fi_crc_impl_) + "'");
 +        }
 +        std::ifstream mf(path, std::ios::binary);
 +        if (!mf.is_open()) {

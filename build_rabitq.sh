@@ -78,7 +78,10 @@ fi
 # is exactly how the ca59bf7 scan timer went uncompiled here for weeks. Note step 1 restores
 # pristine tracked files only when the pin CHANGES, so reverting the header is our job.
 HNSW_HPP="$LIB/include/rabitqlib/index/hnsw/hnsw.hpp"
-RECOVERY_SENTINEL="ex_corrupted_now"   # bump this to the newest symbol whenever the patch grows
+RECOVERY_SENTINEL="fi_crc_impl_"   # bump this to the newest symbol whenever the patch grows
+# NB: the probe on line ~85 below must keep naming an OLD symbol (load_crc_manifest) — it asks
+# "is ANY recovery patch installed?", the opposite question from this sentinel. Bumping both
+# together would make the stale-revert branch unreachable.
 if ! grep -q "$RECOVERY_SENTINEL" "$HNSW_HPP" 2>/dev/null; then
   if grep -q "load_crc_manifest" "$HNSW_HPP" 2>/dev/null; then
     say "[2/7] STALE recovery patch in tree (no $RECOVERY_SENTINEL) — reverting header and re-applying both patches"
@@ -103,6 +106,17 @@ cp "$INSTR/exp_faultinject.cpp" "$INSTR/exp_fieldflip.cpp" "$LIB/sample/" || fai
 
 # Our Stage 0 parity instrument lives in quant_protection (not Samuel's repo): copy it in and
 # register a CMake target alongside the patched ones. Idempotent (skip the append if present).
+# The CRC kernels live in quant_protection as a normal header and are copied into the library's
+# include tree (CMakeLists.txt does include_directories(include), and hnsw.hpp includes it as
+# "rabitqlib/qp_crc32.hpp"). Keeping them here instead of inside recovery-changes.patch is
+# deliberate: the patch is hand-maintained with @@ anchors and no `index` line, so ~200 lines of
+# SIMD in it would be a liability. Untracked in the library repo, so step 1's checkout and step
+# 2b's `git checkout -- hnsw.hpp` both leave it alone.
+CRC_HDR_SRC="$QP_ROOT/rabitq_instrumentation/qp_crc32.hpp"
+if [ -f "$CRC_HDR_SRC" ]; then
+  cp "$CRC_HDR_SRC" "$LIB/include/rabitqlib/" || fail "copy qp_crc32.hpp failed"
+fi
+
 DUMPIDS_SRC="$QP_ROOT/rabitq_instrumentation/exp_dumpids.cpp"
 if [ -f "$DUMPIDS_SRC" ]; then
   cp "$DUMPIDS_SRC" "$LIB/sample/" || fail "copy exp_dumpids.cpp failed"
@@ -160,8 +174,8 @@ fi
 # header: delete it so the cache check below forces a full rebuild (the header is shared, so
 # ALL sample binaries must recompile against the patched hnsw.hpp). Bump the flag grepped here
 # alongside RECOVERY_SENTINEL above whenever the instrument grows one.
-if [ -x "$BIN/exp_dumpids" ] && ! "$BIN/exp_dumpids" 2>&1 | grep -q -- "--crc-mode"; then
-  say "[4/7] exp_dumpids predates --crc-mode; forcing rebuild"
+if [ -x "$BIN/exp_dumpids" ] && ! "$BIN/exp_dumpids" 2>&1 | grep -q -- "--crc-impl"; then
+  say "[4/7] exp_dumpids predates --crc-impl; forcing rebuild"
   rm -f "$BIN/exp_dumpids"
 fi
 # Include exp_dumpids in the cache check so a stale build that predates it triggers a rebuild.

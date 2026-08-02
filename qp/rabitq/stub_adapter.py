@@ -323,9 +323,15 @@ def _recall(ids, gt, k):
     return metrics.recall_at_k(ids, gt, k)
 
 
+# Kept in step with adapter.CRC_IMPLS by test_expb.py, not imported, so the stub stays
+# importable without the real adapter's binary-path checks.
+CRC_IMPLS = ("table", "slice8", "clmul")
+DEFAULT_CRC_IMPL = "clmul"   # kept in step with adapter.DEFAULT_CRC_IMPL by test_expb.py
+
+
 def search_with_eb_fallback(index_path, fraction, seed=0, *, crc_manifest=None, k=None,
                             ef=2000, out_path=None, query_f=None, gt_f=None, timeout=None,
-                            crc_mode="load", crc_timer=False):
+                            crc_mode="load", crc_timer=False, crc_impl=None):
     """Stub stand-in for the EB-fallback search path (E5 slope layer / Option B).
 
     Same signature as the real adapter. With `crc_manifest` it routes through the Option-B
@@ -336,7 +342,8 @@ def search_with_eb_fallback(index_path, fraction, seed=0, *, crc_manifest=None, 
     if crc_manifest:
         res = query_with_recovery(index_path, "fallback_eb", crc_manifest, k=k, ef=ef,
                                   out_path=out_path, query_f=query_f, gt_f=gt_f,
-                                  timeout=timeout, crc_mode=crc_mode, crc_timer=crc_timer)
+                                  timeout=timeout, crc_mode=crc_mode,
+                                  crc_timer=crc_timer, crc_impl=crc_impl)
         res["distances"] = None
     else:
         res = search_corrupted(index_path, k=k, ef=ef, out_path=out_path,
@@ -375,7 +382,7 @@ def _corrupt_ex_elements(buf):
 
 def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=None, ef=2000,
                         out_path=None, stats_json=None, query_f=None, gt_f=None, timeout=None,
-                        crc_mode="load", crc_timer=False):
+                        crc_mode="load", crc_timer=False, crc_impl=None):
     """Deterministic stand-in for exp_dumpids --recovery (same contract as the real adapter).
 
     The CRC side is REAL: with a manifest, the failing-element set comes from
@@ -383,6 +390,11 @@ def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=Non
     geometry echo, and verification code paths are genuinely exercised offline); recovery=none
     diffs against the pristine buffer instead (no CRC check, mirroring the C++ none mode).
     Only the fraction -> recall mapping is a documented fake (_RECOVERY_SLOPE).
+
+    `crc_impl` is likewise accepted and echoed but not modelled: the stub computes CRCs with
+    zlib.crc32, which is precisely the oracle every C++ kernel must reproduce bit-for-bit, so
+    a stub "implementation" of a kernel would be a tautology. Kernel equivalence is proven in
+    artifacts/phase3/tests/test_crc_kernel.py against zlib directly.
 
     `crc_mode` is accepted and echoed, but the stub deliberately does NOT model it. There is no
     real search here, so nothing knows which elements a query would have consulted — and the
@@ -401,8 +413,14 @@ def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=Non
         raise ValueError(f"--recovery {recovery} requires a crc_manifest path")
     if crc_mode not in CRC_MODES:
         raise ValueError(f"crc_mode must be one of {CRC_MODES}, got {crc_mode!r}")
-    if recovery == "none" and (crc_mode != "load" or crc_timer):
-        raise ValueError("recovery='none' never checks a CRC; crc_mode/crc_timer do not apply")
+    # None means "caller did not specify", which is what lets recovery="none" reject an
+    # EXPLICIT kernel choice as meaningless while still having a default for real runs.
+    if crc_impl is not None and crc_impl not in CRC_IMPLS:
+        raise ValueError(f"crc_impl must be one of {CRC_IMPLS}, got {crc_impl!r}")
+    if recovery == "none" and (crc_mode != "load" or crc_timer or crc_impl is not None):
+        raise ValueError("recovery='none' never checks a CRC; "
+                         "crc_mode/crc_timer/crc_impl do not apply")
+    crc_impl = DEFAULT_CRC_IMPL if crc_impl is None else crc_impl
     gt = load_groundtruth()
     buf = np.fromfile(index_path, dtype=np.uint8)
 
@@ -424,6 +442,10 @@ def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=Non
         "recovery": recovery, "crc_manifest": crc_manifest or "", "ef": int(ef), "topk": k,
         "nq": NQ,
         "crc_mode": crc_mode,
+        # Echoed for shape parity with the binary. The stub always computes CRCs with
+        # zlib.crc32 regardless -- which is the point: zlib IS the oracle every kernel
+        # is required to match, so there is nothing for the stub to model here.
+        "crc_impl": crc_impl,
         # Zeroed under lazy for the same reason the binary zeroes them: no load scan ran.
         "load": {"elements_checked": 0 if lazy else checked,
                  "elements_crc_fail": 0 if lazy else

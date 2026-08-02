@@ -16,11 +16,11 @@ This is the sibling of `../first-try/` (HNSW node-failure / cascade study); the 
 ## Environment
 
 ```bash
-bash setup.sh                 # idempotent: build .venv (system Python 3.13), install deps, verify
+bash setup.sh                 # idempotent: build .venv (system python3), install deps, verify
 source .venv/bin/activate
 ```
 
-`setup.sh` is the single entry point (`install.sh` is a deprecated redirect to it). It creates `.venv` from system `python3` (3.13), installs `requirements.txt`, checks the SIFT1M files exist, then runs `verify_env.py`. Re-running is safe — an existing `.venv` is reused.
+`setup.sh` is the single entry point (`install.sh` is a deprecated redirect to it). It creates `.venv` from system `python3` (whatever the host ships), installs `requirements.txt`, checks the SIFT1M files exist, then runs `verify_env.py`. Re-running is safe — an existing `.venv` is reused.
 
 `python verify_env.py` is the smoke test: prints library versions, reads the SIFT base header, runs FlatL2 + IVFFlat searches, exercises the **serialize → flip one bit → deserialize round-trip** (the foundation of the whole corruption-injection method), and a hnswlib query. Exits non-zero on any failure. Run it after changing dependencies.
 
@@ -30,7 +30,10 @@ source .venv/bin/activate
   - FLAT → `IndexFlatL2`; IVF_FLAT → `IndexIVFFlat`; IVF_SQ8 → `IndexIVFScalarQuantizer` (QT_8bit); IVF_PQ → `IndexIVFPQ` (M=8/16, nbits=8); HNSW → `IndexHNSWFlat`; HNSW_SQ8 → `IndexHNSWSQ`.
 - **`hnswlib`** is kept only as a fp32-HNSW cross-check.
 - **No C++ build / no git clone** — everything is a pip wheel (deliberate choice; unlike `first-try/` which builds hnswlib from source). FlatNav and RaBitQ/binary are optional/not installed.
-- **Python 3.13**, system interpreter. faiss-cpu pins to 1.14.2 for arm64 wheel compatibility.
+- **System `python3`**, whatever the host ships — 3.13 originally, 3.12.3 on the current box after
+  the interpreter was removed from it. Not pinned: `faiss-cpu==1.14.2` ships a `cp310-abi3` wheel and
+  the rest are pure-Python or have wheels for both, so the venv rebuilds on either. A `.venv` built for
+  a since-removed interpreter fails as `No module named numpy` — delete it and re-run `setup.sh`.
 
 ## Bit-Flip Injection Method
 

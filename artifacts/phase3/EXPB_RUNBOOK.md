@@ -96,7 +96,59 @@ python phase3_e5_recovery.py --adapter real --region rotation --inject-replicas
 
 Both flag-gated; without the flags the runners produce the original record schema unchanged.
 
-## 5. Bring results back
+## 5. `--crc-mode lazy` alignment run (gate 6, one command)
+
+```bash
+source .venv/bin/activate
+python phase3_expb_recovery.py --adapter real --lazy-gate
+```
+
+Requires an **AVX512BW** CPU like every other real run here (RaBitQ aborts at
+`utils/space.hpp:937` otherwise — check with `grep -o avx512bw /proc/cpuinfo | head -1`).
+Rebuild first if the tree predates the flag: `bash build_rabitq.sh` and confirm
+`exp_dumpids` usage lists `--crc-mode` (the build script forces a rebuild when it does not).
+
+Runs `uniform_accum` @ f=0.05 under both detecting policies and stops at the first failure
+(`artifacts/phase3/expb/expb_lazy_gates.json`):
+
+| gate | check | expected |
+|---|---|---|
+| 0 | binary usage has `--crc-mode` | pass |
+| 1 | clean index, both policies, both modes | nothing flagged in either mode |
+| 2 | **load vs lazy return identical top-k ids** and identical recall | pass |
+| 3 | `0 < lazy distinct failures <= load scan failures` | pass |
+| 4 | overhead measured (reported, never asserted) | numbers written |
+
+**Gate 2 failure = report-and-stop.** The decision points are untouched between the modes, so
+identical ids is a consequence, not a hypothesis — a difference is an implementation bug in
+`ex_bad()` / `ex_corrupted_now()` (`hnsw.hpp`), not a finding. Do not "investigate the
+discrepancy" in the paper; fix the code.
+
+Three overhead numbers land in `expb_lazy_gates.json` per policy and must agree in magnitude:
+
+- `headline_delta_ns_per_query` / `headline_pct_of_search` — `search_wall_ns(lazy) −
+  search_wall_ns(load)`. **The one to quote.** It is unperturbed by any per-check clock, and
+  it is sound precisely because gate 2 proved both runs do the same search work.
+- `timed_ns_per_check` — from the separate `--crc-timer` run. Inflated by two
+  `steady_clock` reads (~40–50 ns) around a ~96-byte CRC (~100–200 ns); a cross-check, not the
+  headline.
+- `analytic_ns_per_query` — `crc_bytes × (load scan ns/byte)`, the least perturbed CRC rate
+  available since the load scan is timed once over 1M elements.
+
+Expect `drop` ≫ `fallback_eb`: drop consults every unvisited neighbour before the bounds guard
+and never reads the ex block it just CRC'd, while EB CRCs exactly the bytes `get_full_est` is
+about to load. That asymmetry is the honest scope of the piggyback claim — see
+`docs/claim_impl_map.md`.
+
+Feed the numbers forward with `python phase3_f_synth.py --synthesize --adapter real`, which
+reads `expb_lazy_gates.json` into `frontier.csv`'s `detect_*` columns (blank, never zero, if
+the run is absent or failed).
+
+**Regression**: gates 1–5 (§2) must still be green in load mode, and Phase D's G sanity
+(`identical_to_truth`) unchanged. G rejects lazy records by design — never point it at a
+`--crc-mode lazy` sweep.
+
+## 6. Bring results back
 
 `expb/*.jsonl`, `expb_summary*.json`, `expb_gates.json`, `expb_meta.json` + run logs, via
 `git_tasks.sh save` conventions (raw jsonl stays on the workstation, numbers/curves travel).

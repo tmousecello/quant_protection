@@ -640,8 +640,10 @@ def run_lazy_gates(ctx):
         for mode in ("fallback_eb", "drop"):
             f_load, r_load = _run_one(ctx, ctx["corrupt_path"], mode, crc_mode="load")
             f_lazy, r_lazy = _run_one(ctx, ctx["corrupt_path"], mode, crc_mode="lazy")
+            # Only the load arm is asserted here (it pins the scan against the injection).
+            # The lazy count is gate 3 below, which reports rather than raising — a bare
+            # assert would abort with a traceback before any gate could be written.
             _check_crc_fail_count(f_load, len(elements), mode, "load")
-            _check_crc_fail_count(f_lazy, len(elements), mode, "lazy")
             ids_same = (r_load is not None and r_lazy is not None
                         and np.array_equal(r_load["ids"], r_lazy["ids"]))
             rec_same = (f_load["recall@10"] is not None

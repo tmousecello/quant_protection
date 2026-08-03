@@ -30,41 +30,41 @@
       "gate": 4,
       "name": "overhead measured (reported, not asserted)",
       "pass": true,
-      "detail": "fallback_eb: -1.7330643296970185% of search wall; drop: 50.70769955921558% of search wall"
+      "detail": "fallback_eb: 1.7946162667736962% of search wall; drop: 51.57757161306522% of search wall"
     }
   ],
   "overhead": {
     "fallback_eb": {
       "n_queries": 10000,
-      "search_wall_ns_load": 14703777444,
-      "search_wall_ns_lazy": 14448951522,
+      "search_wall_ns_load": 14379529584,
+      "search_wall_ns_lazy": 14637586961,
       "crc_checks": 7706852,
       "crc_bytes": 739857792,
       "crc_oob_skipped": 0,
-      "crc_ns_timed": 574354421,
+      "crc_ns_timed": 586094875,
       "crc_checks_timed": 7706852,
-      "load_scan_ns": 8895840,
+      "load_scan_ns": 8344289,
       "load_scan_elements": 1000000,
-      "headline_delta_ns_per_query": -25482.5922,
-      "headline_pct_of_search": -1.7330643296970185,
-      "timed_ns_per_check": 74.52516552802624,
-      "analytic_ns_per_query": 6855.892229568
+      "headline_delta_ns_per_query": 25805.7377,
+      "headline_pct_of_search": 1.7946162667736962,
+      "timed_ns_per_check": 76.04854420455979,
+      "analytic_ns_per_query": 6430.8200368228
     },
     "drop": {
       "n_queries": 10000,
-      "search_wall_ns_load": 14514000915,
-      "search_wall_ns_lazy": 21873716893,
+      "search_wall_ns_load": 14487198591,
+      "search_wall_ns_lazy": 21959343819,
       "crc_checks": 206340332,
       "crc_bytes": 19808671872,
       "crc_oob_skipped": 0,
-      "crc_ns_timed": 14098123052,
+      "crc_ns_timed": 14281677606,
       "crc_checks_timed": 206340332,
-      "load_scan_ns": 8818815,
+      "load_scan_ns": 8349339,
       "load_scan_elements": 1000000,
-      "headline_delta_ns_per_query": 735971.5978,
-      "headline_pct_of_search": 50.70769955921558,
-      "timed_ns_per_check": 68.32461165178313,
-      "analytic_ns_per_query": 181967.721494658
+      "headline_delta_ns_per_query": 747214.5228,
+      "headline_pct_of_search": 51.57757161306522,
+      "timed_ns_per_check": 69.2141835169675,
+      "analytic_ns_per_query": 172280.53812405482
     }
   },
   "config": {

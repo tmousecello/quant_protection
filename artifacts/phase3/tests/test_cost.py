@@ -58,6 +58,24 @@ def test_reconcile_pass_and_fail():
 def test_total_cost():
     mc = cost.mem_cost(REGION_MAP, {"rotation": {"mult": 3, "checksum_bytes": 4}})
     assert cost.total_cost(mc, scrub_overhead=640.0) == mc["total_bytes"] + 640.0
+    # the query-path term is opt-in: omitting it must leave the two-term result unchanged
+    assert cost.total_cost(mc, 640.0, detection_overhead=0.0) == cost.total_cost(mc, 640.0)
+    assert cost.total_cost(mc, 640.0, detection_overhead=12.5) == mc["total_bytes"] + 652.5
+
+
+def test_detection_cost():
+    # 96 B CRC'd per query at 1000 qps = 96 kB/s on the service path
+    assert cost.detection_cost(96.0, 1000.0) == 96000.0
+    assert cost.detection_cost(0, 1000.0) == 0.0
+    with pytest.raises(ValueError):
+        cost.detection_cost(-1.0, 1000.0)
+
+
+def test_detection_overhead_pct():
+    assert cost.detection_overhead_pct(300_000, 15_000_000) == pytest.approx(2.0)
+    assert cost.detection_overhead_pct(0, 15_000_000) == 0.0
+    with pytest.raises(ValueError):
+        cost.detection_overhead_pct(300_000, 0)
 
 
 def test_monotonicity():

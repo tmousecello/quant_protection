@@ -17,7 +17,10 @@ compares, per (pattern, f, severity, recovery):
             corrupt). Informational: query traffic is not uniform over elements.
 
 `recovery == none` rows are excluded (elements_checked == 0 by design — no detection ran)
-and counted in the summary.
+and counted in the summary. Rows produced with `--crc-mode lazy` are REJECTED, not excluded:
+on-access detection observes only the consulted subset, which is an access-weighted quantity
+rather than a noisier estimate of this one, so mixing it in would quietly change what the
+diagonal means. (Rewriting G for the access-weighted view is deliberately left as future work.)
 
 Outputs (default artifacts/phase3/g_detection/): detection_table.csv / .md, a diagonal
 scatter figure, g_detection_summary.json.
@@ -48,6 +51,20 @@ def extract_points(rows, severity):
     for row in rows:
         stats = row.get("stats") or {}
         load = stats.get("load") or {}
+        # G's whole construction is "the load scan checked every element", so it is only
+        # defined for --crc-mode load. Under lazy the scan never runs: load.* is all zeros,
+        # which would look like a recovery=none row and get silently EXCLUDED, quietly
+        # shrinking the diagonal instead of failing. Records predating the flag have no
+        # crc_mode key and are load runs by construction.
+        crc_mode = stats.get("crc_mode", "load")
+        if crc_mode != "load":
+            raise RuntimeError(
+                f"REPORT-AND-STOP: row has crc_mode={crc_mode!r} (pattern={row.get('pattern')} "
+                f"f={row.get('fraction')} recovery={row.get('recovery')}). G's diagonal holds "
+                f"by construction only when the load scan covered every element; on-access "
+                f"detection sees just the consulted subset, which is a DIFFERENT (access-"
+                f"weighted) quantity, not a noisier version of this one. Re-run the sweep with "
+                f"--crc-mode load, or build the access-weighted analysis separately.")
         checked = int(load.get("elements_checked", 0))
         if row.get("recovery") not in DETECTING_MODES or checked <= 0:
             excluded += 1

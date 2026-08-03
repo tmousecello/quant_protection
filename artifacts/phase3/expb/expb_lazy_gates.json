@@ -1,4 +1,80 @@
 {
+  "all_pass": true,
+  "adapter": "real",
+  "gates": [
+    {
+      "gate": 0,
+      "name": "build has --crc-mode",
+      "pass": true,
+      "detail": "usage_has_crc_mode=True"
+    },
+    {
+      "gate": 1,
+      "name": "clean index flags nothing in either mode",
+      "pass": true,
+      "detail": "drop: load_fail=0, lazy_distinct=0; fallback_eb: load_fail=0, lazy_distinct=0"
+    },
+    {
+      "gate": 2,
+      "name": "load vs lazy return identical ids",
+      "pass": true,
+      "detail": "fallback_eb: ids_same=True, recall=0.94329 vs 0.94329; drop: ids_same=True, recall=0.9404999999999999 vs 0.9404999999999999"
+    },
+    {
+      "gate": 3,
+      "name": "lazy distinct failures <= load scan failures",
+      "pass": true,
+      "detail": "fallback_eb: 0 < 47227 <= 50000 -> True; drop: 0 < 49994 <= 50000 -> True"
+    },
+    {
+      "gate": 4,
+      "name": "overhead measured (reported, not asserted)",
+      "pass": true,
+      "detail": "fallback_eb: -1.7330643296970185% of search wall; drop: 50.70769955921558% of search wall"
+    }
+  ],
+  "overhead": {
+    "fallback_eb": {
+      "n_queries": 10000,
+      "search_wall_ns_load": 14703777444,
+      "search_wall_ns_lazy": 14448951522,
+      "crc_checks": 7706852,
+      "crc_bytes": 739857792,
+      "crc_oob_skipped": 0,
+      "crc_ns_timed": 574354421,
+      "crc_checks_timed": 7706852,
+      "load_scan_ns": 8895840,
+      "load_scan_elements": 1000000,
+      "headline_delta_ns_per_query": -25482.5922,
+      "headline_pct_of_search": -1.7330643296970185,
+      "timed_ns_per_check": 74.52516552802624,
+      "analytic_ns_per_query": 6855.892229568
+    },
+    "drop": {
+      "n_queries": 10000,
+      "search_wall_ns_load": 14514000915,
+      "search_wall_ns_lazy": 21873716893,
+      "crc_checks": 206340332,
+      "crc_bytes": 19808671872,
+      "crc_oob_skipped": 0,
+      "crc_ns_timed": 14098123052,
+      "crc_checks_timed": 206340332,
+      "load_scan_ns": 8818815,
+      "load_scan_elements": 1000000,
+      "headline_delta_ns_per_query": 735971.5978,
+      "headline_pct_of_search": 50.70769955921558,
+      "timed_ns_per_check": 68.32461165178313,
+      "analytic_ns_per_query": 181967.721494658
+    }
+  },
+  "config": {
+    "pattern": "uniform_accum",
+    "fraction": 0.05,
+    "ef": 2000,
+    "k": 10,
+    "seed": 1234,
+    "flips_per_element": 4
+  },
   "meta": {
     "adapter_type": "real",
     "platform": {

@@ -3,9 +3,16 @@
 Option B contract (artifacts/phase3/plan/stage2_cpp_patch.md §2b): the definition of "clean"
 stays in qp. Before injection, this module CRCs each element's ex field of the clean index and
 writes a manifest; after injection, the corrupted index file + this manifest go to the patched
-`exp_dumpids --recovery {drop|fallback_eb}`, whose `load_crc_manifest()` re-CRCs the loaded
-bytes and marks mismatching elements corrupted. C++ only COMPARES — it never defines clean and
-never injects (hard rule #1).
+`exp_dumpids --recovery {drop|fallback_eb}`, whose `load_crc_manifest()` compares the loaded
+bytes against these CRCs and marks mismatching elements corrupted. C++ only COMPARES — it never
+defines clean and never injects (hard rule #1).
+
+The manifest is the table of EXPECTED CRCs for both of the binary's `--crc-mode` settings; it
+does not itself decide when the comparison happens. Under `load` the C++ side walks the whole
+table once at load time; under `lazy` it keeps the table and recomputes an element's CRC at the
+moment the search consults that element (the on-access design of the paper's Sec 3.1/3.3). The
+file format is identical either way — that is what the per-entry (offset, len, crc) triple is
+for, since lazy needs to address one entry by element id.
 
 Granularity: one entry PER ELEMENT over that element's `ex_code` field (96 B on the SIFT b=7
 index). This is the per-candidate refinement of the E5 slope layer's chunking
@@ -132,8 +139,11 @@ def read_manifest(path):
 def verify_buffer(buf, manifest):
     """Element indices whose current bytes mismatch the manifest CRC (empty list == clean).
 
-    The Python mirror of the C++ loader's eager scan — used by the stub adapter (so the manifest
-    code path is genuinely exercised offline) and by the driver's pre-flight sanity check.
+    The Python mirror of the C++ loader's `--crc-mode load` whole-table pass — used by the stub
+    adapter (so the manifest code path is genuinely exercised offline) and by the driver's
+    pre-flight sanity check. Offline there is no search to piggyback on, so there is no Python
+    mirror of `--crc-mode lazy`; on an index that does not change mid-run the two agree by
+    construction, and that equivalence is gated on the real adapter, not assumed here.
     """
     buf = np.asarray(buf, dtype=np.uint8)
     hdr = manifest["header"]

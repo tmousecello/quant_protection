@@ -41,6 +41,24 @@ BINARIES = ("hnsw_rabitq_indexing", "hnsw_rabitq_querying", "exp_faultinject",
 # pessimistic rank (Samuel exp-3 semantics, computed in C++).
 RECOVERY_MODES = ("none", "drop", "fallback_eb")
 
+# WHEN the CRC is computed (orthogonal to WHAT it decides). load = eager whole-index scan at
+# load, the original behaviour and still the default; lazy = on-access, recomputed as the
+# search consults an element (the Sec 3.1/3.3 piggyback design, which does not assume the
+# index is immutable during querying). Same predicate, same decision points, same ids.
+CRC_MODES = ("load", "lazy")
+# Which CRC kernel computes the check. All are bit-identical to zlib.crc32 (proven in
+# artifacts/phase3/tests/test_crc_kernel.py), so this selects SPEED ONLY -- it can never
+# change a verdict, an id or a recall. "table" is the original byte-at-a-time loop and
+# stays the default so every frozen configuration re-runs unchanged.
+CRC_IMPLS = ("table", "slice8", "clmul")
+# Driver default. Measured on meow1 (median of 3 interleaved rounds, clean index, ef=2000):
+# clmul cuts query-path detection cost by 70% for fallback_eb (+8.51% -> +2.55% of search
+# wall) and 76% for drop (+209.83% -> +49.92%), and the load scan by 11.5x (112.9 -> 9.8 ms).
+# See docs/crc_kernel.md. The BINARY still defaults to "table" so a bare command line stays
+# backward compatible; the drivers pass this explicitly, and stats["crc_impl"] echoes what
+# was actually used.
+DEFAULT_CRC_IMPL = "clmul"
+
 # Documented anchor for golden comparison (results/datasets/sift/ladder.csv plateau, b=7).
 # This is a REFERENCE constant, never returned as if it were a fresh measurement.
 EXPECTED_CLEAN_RECALL10 = 0.983
@@ -206,7 +224,8 @@ def query_ids(index_path=None, k=None, ef=2000, out_path=None, query_f=None, gt_
 
 
 def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=None, ef=2000,
-                        out_path=None, stats_json=None, query_f=None, gt_f=None, timeout=None):
+                        out_path=None, stats_json=None, query_f=None, gt_f=None, timeout=None,
+                        crc_mode="load", crc_timer=False, crc_impl=None):
     """Run the Option-B exp_dumpids with query-time CRC recovery (stage2_cpp_patch.md §2a).
 
     `index_path` is a (possibly already-corrupted BY PYTHON) index file; `crc_manifest` is the
@@ -215,10 +234,20 @@ def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=Non
     its RECALL stdout line is parity-only; recompute the authoritative recall from the returned
     ids with qp.metrics (hard rule #2).
 
+    `crc_mode` picks WHEN the CRC runs, not what it decides:
+      "load" (default) — eager whole-index scan at load; stats["load"] carries its totals.
+      "lazy"           — on-access, recomputed as the search consults each element (the
+                         Sec 3.1/3.3 piggyback design). stats["load"] is then all zeros (no
+                         scan ran) and stats["crc"] carries the on-access totals instead.
+    Both modes use the same predicate at the same decision points, so on an index that does not
+    change mid-run they return bit-identical ids — asserted by phase3_expb_recovery --lazy-gate.
+    `crc_timer` times each on-access CRC into stats["crc"]["ns"]; it is off by default because
+    the clock reads both inflate that number and perturb stats["search_wall_ns"].
+
     Returns {"ids": (nq,k) int32 (-1 pads), "cpp_recall": float, "stats": dict|None} where
-    `stats` is the binary's stats json (load-time CRC scan totals + per-query counters).
-    Subprocess crash/timeout propagate as CalledProcessError / TimeoutExpired for the runner
-    to record as `crash`.
+    `stats` is the binary's stats json (crc_mode + load-scan totals + on-access CRC totals +
+    per-query counters). Subprocess crash/timeout propagate as CalledProcessError /
+    TimeoutExpired for the runner to record as `crash`.
     """
     import json
 
@@ -227,16 +256,39 @@ def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=Non
         raise ValueError(f"recovery must be one of {RECOVERY_MODES}, got {recovery!r}")
     if recovery != "none" and not crc_manifest:
         raise ValueError(f"--recovery {recovery} requires a crc_manifest path")
+    if crc_mode not in CRC_MODES:
+        raise ValueError(f"crc_mode must be one of {CRC_MODES}, got {crc_mode!r}")
+    # None means "caller did not specify", which is what lets recovery="none" reject an
+    # EXPLICIT kernel choice as meaningless while still having a default for real runs.
+    if crc_impl is not None and crc_impl not in CRC_IMPLS:
+        raise ValueError(f"crc_impl must be one of {CRC_IMPLS}, got {crc_impl!r}")
+    if recovery == "none" and (crc_mode != "load" or crc_timer or crc_impl is not None):
+        raise ValueError("recovery='none' never checks a CRC; "
+                         "crc_mode/crc_timer/crc_impl do not apply")
+    crc_impl = DEFAULT_CRC_IMPL if crc_impl is None else crc_impl
     k = config.K if k is None else int(k)
     query_f = query_f or os.path.join(PREP, "query.fvecs")
     gt_f = gt_f or os.path.join(PREP, "groundtruth.ivecs")
-    out_path = out_path or os.path.join(PREP, f"_dumpids_{recovery}_ef{int(ef)}_k{k}.ivecs")
+    # The default scratch name carries crc_mode only for lazy, so every existing caller's
+    # paths stay byte-identical while a load/lazy pair cannot overwrite each other's dumps.
+    tag = "" if crc_mode == "load" else f"_{crc_mode}"
+    out_path = out_path or os.path.join(PREP, f"_dumpids_{recovery}{tag}_ef{int(ef)}_k{k}.ivecs")
     stats_json = stats_json or out_path + ".stats.json"
     cmd = [os.path.join(BIN, "exp_dumpids"), index_path, query_f, gt_f, METRIC,
            str(int(ef)), out_path, str(k),
            "--recovery", recovery, "--stats-json", stats_json]
     if recovery != "none":
         cmd += ["--crc-manifest", crc_manifest]
+        # Appended only for lazy: the load-mode command line stays literally what it was
+        # before this flag existed, so re-running a frozen configuration is unchanged.
+        if crc_mode != "load":
+            cmd += ["--crc-mode", crc_mode]
+        if crc_timer:
+            cmd.append("--crc-timer")
+        # Always explicit, unlike --crc-mode: the binary and the drivers deliberately have
+        # DIFFERENT defaults (binary "table" for backward compatibility, drivers clmul for
+        # speed), so omitting the flag would silently pick the slow kernel.
+        cmd += ["--crc-impl", crc_impl]
     res = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=timeout)
     cpp_recall = None
     for line in res.stdout.splitlines():
@@ -254,7 +306,8 @@ def query_with_recovery(index_path, recovery="none", crc_manifest=None, *, k=Non
 
 
 def search_with_eb_fallback(index_path, fraction, seed=0, *, crc_manifest=None, k=None,
-                            ef=2000, out_path=None, query_f=None, gt_f=None, timeout=None):
+                            ef=2000, out_path=None, query_f=None, gt_f=None, timeout=None,
+                            crc_mode="load", crc_timer=False, crc_impl=None):
     """EB-fallback search of an ALREADY-corrupted index (E5 slope layer contract).
 
     Requires `crc_manifest` — the qp-written CRC manifest of the CLEAN index (Option B). With
@@ -276,7 +329,9 @@ def search_with_eb_fallback(index_path, fraction, seed=0, *, crc_manifest=None, 
             "Without it the C++ side would have to invent the definition of 'clean' "
             f"(index_path={index_path!r}, fraction={fraction!r}, seed={seed!r})")
     res = query_with_recovery(index_path, "fallback_eb", crc_manifest, k=k, ef=ef,
-                              out_path=out_path, query_f=query_f, gt_f=gt_f, timeout=timeout)
+                              out_path=out_path, query_f=query_f, gt_f=gt_f, timeout=timeout,
+                              crc_mode=crc_mode, crc_timer=crc_timer,
+                              crc_impl=crc_impl)
     res["distances"] = None
     res["_eb_path"] = True
     res["eb_fraction"] = float(fraction)

@@ -28,7 +28,25 @@
     },
     "slope_manifest_bytes": 16000064,
     "index_total_bytes": 280573456,
-    "n_elements": 1000000
+    "n_elements": 1000000,
+    "query_path_detection": {
+      "fallback_eb": {
+        "ns_per_query": 111795.0723,
+        "pct_of_search": 7.744638108917844,
+        "crc_bytes_per_query": 73985.7792,
+        "timed_ns_per_check": 193.9603085669739,
+        "analytic_ns_per_query": 93918.47370940521
+      },
+      "drop": {
+        "ns_per_query": 3269525.3572,
+        "pct_of_search": 224.24083713626743,
+        "crc_bytes_per_query": 1980867.1872,
+        "timed_ns_per_check": 186.95193789840368,
+        "analytic_ns_per_query": 2509883.7065214925
+      },
+      "source": "/home/u01/tmouse/quant_protection/artifacts/phase3/expb/expb_lazy_gates.json",
+      "adapter": "real"
+    }
   },
   "meta": {
     "adapter_type": "real",
@@ -39,8 +57,8 @@
       "uname": [
         "Linux",
         "meow1",
-        "6.17.0-19-generic",
-        "#19-Ubuntu SMP PREEMPT_DYNAMIC Fri Mar  6 14:02:58 UTC 2026",
+        "6.17.0-41-generic",
+        "#41-Ubuntu SMP PREEMPT_DYNAMIC Sat Jun 20 18:01:40 UTC 2026",
         "x86_64"
       ]
     },

@@ -2,11 +2,11 @@
 #
 # quant_protection 環境建立腳本（量化索引 bit-flip 敏感度研究）
 #
-# 一鍵：建立 venv (系統 Python 3.13) -> 裝齊 FAISS + hnswlib 等依賴
+# 一鍵：建立 venv (系統 python3) -> 裝齊 FAISS + hnswlib 等依賴
 #       -> 驗證 SIFT1M 就緒 -> 跑 verify_env.py smoke test。
 # 冪等：可重複執行，.venv 已存在則沿用。
 #
-# 使用者決策：FAISS + hnswlib (pip wheel，無需 clone/編譯)、只用現有 SIFT1M、系統 Python 3.13。
+# 使用者決策：FAISS + hnswlib (pip wheel，無需 clone/編譯)、只用現有 SIFT1M、系統 python3。
 #
 # 用法:  bash setup.sh
 #

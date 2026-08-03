@@ -320,6 +320,26 @@ class TestGDetection:
                 [_g_row("uniform_accum", 0.05, 0.05, "drop", 900, 45, 2000, 90,
                         n_elements=50)], "light")
 
+    def test_lazy_rows_are_rejected_not_silently_excluded(self):
+        # A lazy row's load.* is all zeros, which would otherwise look exactly like a
+        # recovery=none row and vanish from the diagonal without a word.
+        row = _g_row("uniform_accum", 0.05, 0.05, "drop", 0, 0, 2000, 100)
+        row["stats"]["crc_mode"] = "lazy"
+        with pytest.raises(RuntimeError, match="crc_mode"):
+            extract_points([row], "light")
+
+    def test_rows_without_crc_mode_are_treated_as_load(self):
+        # Every frozen Stage-2/3 record predates the flag; they must keep working untouched.
+        row = _g_row("uniform_accum", 0.05, 0.05, "drop", 1000, 50, 2000, 100)
+        assert "crc_mode" not in row["stats"]
+        pts, _ = extract_points([row], "light")
+        assert len(pts) == 1 and pts[0]["observed_load"] == pytest.approx(0.05)
+
+        explicit = _g_row("uniform_accum", 0.05, 0.05, "drop", 1000, 50, 2000, 100)
+        explicit["stats"]["crc_mode"] = "load"
+        pts2, _ = extract_points([explicit], "light")
+        assert len(pts2) == 1
+
     def test_detecting_mode_zero_checked_excluded_not_divzero(self):
         # a drop/fallback_eb row with elements_checked == 0 must be excluded, not raise
         pts, excl = extract_points(

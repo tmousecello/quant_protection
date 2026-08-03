@@ -176,14 +176,29 @@ figures characterise *this* kernel, not on-access detection in general.
 
 | option | polynomial-compatible? | manifest change | extra memory | 96 B compute (projected) |
 |---|---|---|---|---|
-| PCLMULQDQ folding | ✅ same 0xEDB88320 | **none** — stays bit-identical to `zlib.crc32` | none (no table) | ~15–25 ns |
-| SSE4.2 `_mm_crc32_u64` | ❌ CRC32**C** (0x82F63B78) | new `algo` tag + regenerate | none (no table) | ~6–10 ns |
+| PCLMULQDQ folding | ✅ same 0xEDB88320 | **none** — stays bit-identical to `zlib.crc32` | ~~none (no table)~~ → **8 KB as built** (see note) | ~15–25 ns |
+| SSE4.2 `_mm_crc32_u64` | ❌ CRC32**C** (0x82F63B78) | new `algo` tag + regenerate | none (no table) | ~6–10 ns, but polynomial-incompatible ⇒ unusable |
 | slicing-by-8 | ✅ same | none | +7 KB constant table | ~17 ns |
 
 The manifest header already reserves `u32 algo` at offset 12 (`ALGO_CRC32 = 1`), so a second
 algorithm was anticipated by the format. PCLMULQDQ is nonetheless the more attractive route: it
 keeps byte-identical compatibility with every frozen manifest and record, so nothing needs
 re-running.
+
+> **Correction — the "no table" cell above was wrong for what we built.** It holds for a
+> Barrett-reduction implementation. Ours finishes the fold through `slice8` instead, so it needs
+> the same 8 KB table (measured: `sizeof(qp_crc::Tables)` = 8192 B, binary `.bss` = 8224 B). The
+> table is one shared static, so the process pays 8 KB whichever kernel is selected — the `table`
+> control arm now costs 7 KB more than the original 1 KB loop did. Deliberate: 8 KB is 0.003% of
+> the index and L1-resident, whereas Barrett costs 2–3 serially dependent clmuls (~15 cycles on
+> Zen 5) out of a ~28-cycle budget at 96 B. **Detection-layer resident memory is unchanged** —
+> `fi_crc_expect_` is still 4 B/element = 1.43%, so the accounting above stands.
+>
+> Hardware use verified by disassembly, not assumed: the built binary emits `vpclmullqlqdq` /
+> `vpclmulhqhqdq` (PCLMULQDQ, imm 0x00/0x11, VEX-encoded XMM). Note `grep pclmulqdq` finds
+> nothing — objdump prints the immediate-folded pseudo-mnemonics — so that grep is not evidence
+> of absence. SSE4.2 `crc32`: 0 occurrences, as required. 512-bit VPCLMULQDQ: not used, and would
+> not help at 96 B.
 
 **But the ceiling is memory, not CRC.** Once the kernel is fast, what remains for `drop` is the
 1.98 MB/query of ex data it pulls in that the 1-bit traversal would never have touched.

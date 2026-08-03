@@ -106,6 +106,63 @@ This is also why our result diverges from the literature; see below.
 
 ## Licensing: nothing was copied
 
+## What hardware is actually used (verified by disassembly)
+
+Confirmed in the built `exp_dumpids`, not inferred:
+
+```
+8a59: c4 e3 69 44 c8 00    vpclmullqlqdq %xmm0,%xmm2,%xmm1
+8a5f: c4 e3 69 44 d8 11    vpclmulhqhqdq %xmm0,%xmm2,%xmm3
+```
+
+Ten such instructions are emitted. **Yes, this is hardware acceleration** — those are
+`PCLMULQDQ` with `imm8=0x00` and `0x11`; GNU objdump prints the immediate-folded pseudo-mnemonics
+rather than the raw name, so `grep pclmulqdq` finds nothing and is not evidence of absence. The
+`c4 e3` prefix is VEX — `-march=native` gives the AVX encoding of the same 128-bit XMM operation.
+
+Two things it deliberately does **not** use:
+
+- **SSE4.2's dedicated `crc32` instruction: 0 occurrences.** That instruction is the one people
+  usually mean by "CRC hardware support", but it is hardwired to Castagnoli (CRC-32C). It cannot
+  produce a zlib-compatible CRC-32 at any speed. Using a *general-purpose* carry-less multiply to
+  get a *specific* polynomial is the entire point of Intel 323102.
+- **512-bit `VPCLMULQDQ` (ZMM): not used.** The emitted ops are 128-bit XMM. Zen 5 sustains
+  0.5 VPCLMULQDQ/cycle at *every* width, so a ZMM version does 4× the work per instruction — a
+  large win for megabyte buffers and worth nothing at 96 B, where one wide op is immediately
+  followed by a latency-bound tail.
+
+## Memory: this implementation uses MORE, not less
+
+An earlier draft of this document claimed the PCLMULQDQ route needs "no table". **That is true of
+a Barrett-based implementation and false of ours**, because ours finishes through `slice8`:
+
+| kernel | static table | vs original |
+|---|---|---|
+| original `fi_crc32` | 1 024 B (256 × 4 B) | — |
+| `slice8` | 8 192 B (8 × 256 × 4 B) | 8× |
+| **`clmul` (ours)** | **8 192 B — shares the same table** | **8×** |
+
+Measured: `sizeof(qp_crc::Tables)` = 8192 B, and the binary's `.bss` is 8224 B.
+
+The table is a single shared static, so the process pays 8 KB once regardless of which kernel is
+selected — including the `table` control arm, which therefore also costs 7 KB more than it used
+to. That is the honest accounting.
+
+It is nonetheless the right trade:
+
+- 8 KB is **0.003%** of the 280 MB index, and fits in L1D (32–48 KB on Zen 5) alongside the
+  working set.
+- The alternative that would remove it — Barrett reduction — costs 2–3 serially dependent
+  clmuls (~15 cycles on Zen 5) against `slice8`-finish's ~4, on a kernel whose whole 96 B budget
+  is ~28 cycles. Trading 7 KB of L1-resident constants for ~25% of the kernel's runtime is not a
+  good deal.
+
+**The detection layer's resident memory is unchanged by the kernel choice**: `fi_crc_expect_`
+(4 B/element = 4 MB = 1.43% of the index) and friends are the same for all three. The
+"file format ≠ resident cost" accounting in `claim_impl_map.md` is unaffected.
+
+## Reference implementations and licensing
+
 | implementation | license | usable here? |
 |---|---|---|
 | [Chromium `crc32_simd.c`](https://github.com/chromium/chromium/blob/main/third_party/zlib/crc32_simd.c) | BSD-3-clause | yes — ~143 self-contained lines, the cleanest to adapt |

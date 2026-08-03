@@ -1,0 +1,218 @@
+{
+  "experiment": "e6_shapes",
+  "shapes": [
+    "single_cell"
+  ],
+  "strata": [
+    "centroids"
+  ],
+  "arms": [
+    "off",
+    "on"
+  ],
+  "shard": {
+    "is_shard": true,
+    "full_grid_shapes": [
+      "single_cell",
+      "device_row",
+      "device_column"
+    ],
+    "full_grid_strata": [
+      "rotation",
+      "centroids",
+      "ex_code",
+      "bin_code",
+      "links",
+      "factors",
+      "ids"
+    ],
+    "full_grid_rows": 1260,
+    "out_tag": "single_cell__centroids_v2cent_hdr"
+  },
+  "seeds": 30,
+  "cfg": {
+    "seeds": 30,
+    "ef": 2000,
+    "row_bytes": 8192,
+    "n_rows": 512,
+    "p_in_row": 0.5,
+    "cliff_regions": [
+      "rotation",
+      "centroids",
+      "header"
+    ]
+  },
+  "clean_recall@10": 0.98376,
+  "cells": {
+    "single_cell|centroids|off": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.983685,
+      "median_delta_recall": 7.5e-05,
+      "p95_delta_recall": 0.076116,
+      "median_bits_flipped": 1.0,
+      "median_coverage_bytes": 1.0,
+      "median_elements_crc_fail": null,
+      "median_fallbacks": null,
+      "median_cliff_repaired": null,
+      "median_oob_restored": null,
+      "outcomes": {
+        "tolerated": 23,
+        "silent_wrong": 7
+      }
+    },
+    "single_cell|centroids|on": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.98376,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 0.0,
+      "median_bits_flipped": 1.0,
+      "median_coverage_bytes": 1.0,
+      "median_elements_crc_fail": 0.0,
+      "median_fallbacks": 0.0,
+      "median_cliff_repaired": 1.0,
+      "median_oob_restored": 0.0,
+      "outcomes": {
+        "repaired": 30
+      }
+    }
+  },
+  "smear": {
+    "single_cell|centroids": {
+      "median_bytes_touched": 1.0,
+      "median_bytes_in_anchor_element_field": 1.0,
+      "median_fraction_in_anchor_element_field": 1.0,
+      "median_bytes_in_anchor_field": 1.0,
+      "median_fraction_in_anchor_field": 1.0,
+      "fields_hit": {
+        "centroids": 60
+      }
+    }
+  },
+  "sanity": {
+    "row_count_ok": true,
+    "expected_rows": 60,
+    "rows": 60,
+    "state_leak_bytes": 0,
+    "per_eval_footprint_gate_evals": 60,
+    "final_research_drift": 0.0,
+    "stub_sandbox_ok": true
+  },
+  "adapter": "real",
+  "meta": {
+    "adapter_type": "real",
+    "platform": {
+      "machine": "x86_64",
+      "system": "Linux",
+      "hostname": "meow1",
+      "uname": [
+        "Linux",
+        "meow1",
+        "6.17.0-41-generic",
+        "#41-Ubuntu SMP PREEMPT_DYNAMIC Sat Jun 20 18:01:40 UTC 2026",
+        "x86_64"
+      ]
+    },
+    "platform_confirmed_real": true,
+    "confirmation_basis": [
+      "adapter_resolved=real",
+      "platform.machine()=x86_64",
+      "clean@10=0.98376 vs expected=0.983 -> tolerance_ok=True"
+    ],
+    "clean_baseline": {
+      "recall@10": 0.98376,
+      "expected": 0.983,
+      "diff": 0.00076,
+      "tolerance_ok": true,
+      "tol": 0.01
+    },
+    "index_geometry": {
+      "dim": 128,
+      "padded_dim": 128,
+      "num_cluster": 16,
+      "ex_bits": 6,
+      "cur_element_count": 1000000,
+      "M": 16,
+      "maxM": 16,
+      "maxM0": 32,
+      "ef_construction": 200
+    },
+    "rabitq": {
+      "library_commit": "7e39df2fcff6161af5c4a77cc3dd1709684fb52b",
+      "binaries_built_flag": true,
+      "note": "binaries_built is NOT a platform signal (stub returns True); platform is confirmed via platform_confirmed_real"
+    },
+    "study_config": {
+      "seed": 1234,
+      "k": 10,
+      "dim": 128,
+      "ef": 2000,
+      "smoke": false
+    },
+    "deps": {
+      "numpy": "2.4.6",
+      "faiss": "1.14.2"
+    },
+    "units": {
+      "pct_collapse": "percent_0_100",
+      "pct_collapse_worst_bucket": "percent_0_100",
+      "pct_collapse_overall": "percent_0_100",
+      "pct_harmful": "percent_0_100",
+      "pct_crash": "percent_0_100",
+      "pct_catastrophic": "percent_0_100",
+      "pct_benign": "percent_0_100",
+      "frac_collapse_worst_bucket": "fraction_0_1",
+      "frac_collapse_overall": "fraction_0_1",
+      "p1_single_bit_collapse": "fraction_0_1",
+      "collapse_frac": "fraction_0_1",
+      "predicted": "fraction_0_1",
+      "measured": "fraction_0_1",
+      "dRecall@10": "abs_recall_delta_0_1",
+      "mean_dRecall@10": "abs_recall_delta_0_1",
+      "max_dRecall@10": "abs_recall_delta_0_1",
+      "p99_dRecall@10": "abs_recall_delta_0_1"
+    },
+    "corruption": {
+      "index_sha256": "fed2b2454a80be9e0b765913361cb89815c08bfd43093e87a78bb3904e88dd26",
+      "corrupted_regions": [
+        "rotation",
+        "centroids",
+        "ex_code",
+        "bin_code",
+        "links",
+        "factors",
+        "ids"
+      ],
+      "recovery": [
+        "off",
+        "fallback_eb"
+      ],
+      "crc_manifest_sha256": "6c6ca3f6c9a41ee7b6a4092b9f07452a4bab5ed55a322cd62e17498168328a3f"
+    },
+    "shape_weights": {
+      "path": "/home/u01/results/jonathan-vuln-shapes/shape_weights.json",
+      "present": false
+    },
+    "fault_shape_modeling": {
+      "row_bytes": 8192,
+      "n_rows": 512,
+      "p_in_row": 0.5,
+      "caveat": "row_bytes/n_rows are OUR modeling units (qp.faults group-4 caveat), not datasheet DRAM geometry \u2014 treat as sensitivity knobs, not hardware facts."
+    },
+    "outcome_thresholds": {
+      "retention_tol": 0.005,
+      "delta_tol": 0.01
+    },
+    "clean_baseline_both_paths": {
+      "search_corrupted_recall@10": 0.98376,
+      "query_with_recovery_recall@10": 0.98376,
+      "abs_diff": 0.0,
+      "gate": "abs_diff <= RETENTION_TOL (0.005)"
+    },
+    "spec_deviations": {
+      "strata_split": "spec E1 merges rotation+centroids into one stratum; E6 splits them. Byte-weighted over the merged window the 64-B rotation is drawn <1% of the time, so the row-in-rotation headline cell would never fill. Grid is 3x7x30x2.",
+      "bounds_check": "arm ON uses E6's vectorized FULL-index pointer bounds check instead of E5's fixed 16-element sample: E6 measures mechanism coverage, not E5's accumulation timeline, and a sampled check cannot see a fault at element 300,000. The guard's own counter is kept as guard_oob_elements."
+    }
+  }
+}

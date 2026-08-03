@@ -1,0 +1,904 @@
+{
+  "experiment": "e10_header_coverage",
+  "index": "/home/u01/tmouse/StorageSystemProject_RaBitQ_Free-recovery/results/datasets/sift/idx/hnsw_M16_efC200_b7.index",
+  "file_size": 280573456,
+  "header_bytes": 156,
+  "clean_header": {
+    "max_elements": 1000000,
+    "cur_element_count": 1000000,
+    "dim": 128,
+    "padded_dim": 128,
+    "num_cluster": 16,
+    "ex_bits": 6,
+    "size_bin_data": 28,
+    "size_ex_data": 104,
+    "size_links_level0": 132,
+    "offsetBinData": 140,
+    "offsetExData": 168,
+    "label_offset": 136,
+    "size_data_per_element": 272,
+    "size_links_per_element": 68,
+    "maxlevel": 5,
+    "enterpoint_node": 572229,
+    "M": 16,
+    "maxM": 16,
+    "maxM0": 32,
+    "mult": 0.36067376022224085,
+    "ef_construction": 200
+  },
+  "constraints": [
+    {
+      "name": "padded_dim_is_dim_rounded",
+      "kind": "invariant"
+    },
+    {
+      "name": "count_within_capacity",
+      "kind": "invariant"
+    },
+    {
+      "name": "enterpoint_in_range",
+      "kind": "invariant"
+    },
+    {
+      "name": "maxlevel_sane",
+      "kind": "invariant"
+    },
+    {
+      "name": "maxM_matches_M",
+      "kind": "invariant"
+    },
+    {
+      "name": "size_links_level0_formula",
+      "kind": "invariant"
+    },
+    {
+      "name": "size_links_per_element_formula",
+      "kind": "invariant"
+    },
+    {
+      "name": "ex_bits_in_range",
+      "kind": "invariant"
+    },
+    {
+      "name": "size_bin_data_formula",
+      "kind": "invariant"
+    },
+    {
+      "name": "size_ex_data_formula",
+      "kind": "invariant"
+    },
+    {
+      "name": "label_offset_formula",
+      "kind": "invariant"
+    },
+    {
+      "name": "offset_bin_formula",
+      "kind": "invariant"
+    },
+    {
+      "name": "offset_ex_formula",
+      "kind": "invariant"
+    },
+    {
+      "name": "element_blocks_fit",
+      "kind": "invariant"
+    },
+    {
+      "name": "size_data_per_element_formula",
+      "kind": "invariant"
+    },
+    {
+      "name": "mult_matches_M",
+      "kind": "invariant"
+    },
+    {
+      "name": "file_size_accounts",
+      "kind": "invariant"
+    },
+    {
+      "name": "num_cluster_plausible",
+      "kind": "policy"
+    },
+    {
+      "name": "level0_alloc_plausible",
+      "kind": "policy"
+    },
+    {
+      "name": "ef_construction_plausible",
+      "kind": "policy"
+    }
+  ],
+  "coverage": {
+    "cases_enumerated": 1248,
+    "detected_header_only": 1129,
+    "detected_with_body": 1143,
+    "detected_with_full_walk": 1172,
+    "detected_fraction_header_only": 0.9046474358974359,
+    "detected_fraction_with_body": 0.9158653846153846,
+    "detected_fraction_with_full_walk": 0.9391025641025641,
+    "escape_classes": {
+      "desync": 19,
+      "level_overrun": 24,
+      "alloc": 25,
+      "benign": 51
+    },
+    "escaped_desync_cases": [],
+    "per_field": [
+      {
+        "field": "max_elements",
+        "struct": "<Q",
+        "byte_offset": 0,
+        "bits": 64,
+        "detected_header_only": 39,
+        "detected_with_body": 39,
+        "undetected_with_body": 25,
+        "detected_fraction_header_only": 0.609375,
+        "detected_fraction_with_body": 0.609375,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 25,
+          "benign": 0
+        },
+        "undetected_examples": [
+          {
+            "bit": 0,
+            "value": 1000001,
+            "class": "alloc",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 1,
+            "value": 1000002,
+            "class": "alloc",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 2,
+            "value": 1000004,
+            "class": "alloc",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 3,
+            "value": 1000008,
+            "class": "alloc",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 4,
+            "value": 1000016,
+            "class": "alloc",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 5,
+            "value": 1000032,
+            "class": "alloc",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 7,
+            "value": 1000128,
+            "class": "alloc",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 8,
+            "value": 1000256,
+            "class": "alloc",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          }
+        ]
+      },
+      {
+        "field": "cur_element_count",
+        "struct": "<Q",
+        "byte_offset": 8,
+        "bits": 64,
+        "detected_header_only": 58,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 0.90625,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 6,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": [
+          {
+            "bit": 6,
+            "value": 999936,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 9,
+            "value": 999488,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 14,
+            "value": 983616,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 16,
+            "value": 934464,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 17,
+            "value": 868928,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 18,
+            "value": 737856,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          }
+        ]
+      },
+      {
+        "field": "dim",
+        "struct": "<Q",
+        "byte_offset": 16,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "padded_dim",
+        "struct": "<Q",
+        "byte_offset": 24,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "num_cluster",
+        "struct": "<Q",
+        "byte_offset": 32,
+        "bits": 64,
+        "detected_header_only": 51,
+        "detected_with_body": 59,
+        "undetected_with_body": 5,
+        "detected_fraction_header_only": 0.796875,
+        "detected_fraction_with_body": 0.921875,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 13,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": [
+          {
+            "bit": 0,
+            "value": 17,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 1,
+            "value": 18,
+            "class": "desync",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 2,
+            "value": 20,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 3,
+            "value": 24,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 5,
+            "value": 48,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 6,
+            "value": 80,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 7,
+            "value": 144,
+            "class": "desync",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 8,
+            "value": 272,
+            "class": "desync",
+            "caught_by_body_check": true,
+            "caught_by_full_walk": true
+          }
+        ]
+      },
+      {
+        "field": "ex_bits",
+        "struct": "<Q",
+        "byte_offset": 40,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "size_bin_data",
+        "struct": "<Q",
+        "byte_offset": 48,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "size_ex_data",
+        "struct": "<Q",
+        "byte_offset": 56,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "size_links_level0",
+        "struct": "<Q",
+        "byte_offset": 64,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "offsetBinData",
+        "struct": "<Q",
+        "byte_offset": 72,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "offsetExData",
+        "struct": "<Q",
+        "byte_offset": 80,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "label_offset",
+        "struct": "<I",
+        "byte_offset": 88,
+        "bits": 32,
+        "detected_header_only": 32,
+        "detected_with_body": 32,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "size_data_per_element",
+        "struct": "<Q",
+        "byte_offset": 92,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "size_links_per_element",
+        "struct": "<Q",
+        "byte_offset": 100,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "maxlevel",
+        "struct": "<i",
+        "byte_offset": 108,
+        "bits": 32,
+        "detected_header_only": 26,
+        "detected_with_body": 26,
+        "undetected_with_body": 6,
+        "detected_fraction_header_only": 0.8125,
+        "detected_fraction_with_body": 0.8125,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 4,
+          "alloc": 0,
+          "benign": 2
+        },
+        "undetected_examples": [
+          {
+            "bit": 0,
+            "value": 4,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 1,
+            "value": 7,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 2,
+            "value": 1,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 3,
+            "value": 13,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 4,
+            "value": 21,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 5,
+            "value": 37,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          }
+        ]
+      },
+      {
+        "field": "enterpoint_node",
+        "struct": "<I",
+        "byte_offset": 112,
+        "bits": 32,
+        "detected_header_only": 12,
+        "detected_with_body": 12,
+        "undetected_with_body": 20,
+        "detected_fraction_header_only": 0.375,
+        "detected_fraction_with_body": 0.375,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 20,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": [
+          {
+            "bit": 0,
+            "value": 572228,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 1,
+            "value": 572231,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 2,
+            "value": 572225,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 3,
+            "value": 572237,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 4,
+            "value": 572245,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 5,
+            "value": 572261,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 6,
+            "value": 572165,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          },
+          {
+            "bit": 7,
+            "value": 572357,
+            "class": "level_overrun",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": true
+          }
+        ]
+      },
+      {
+        "field": "M",
+        "struct": "<Q",
+        "byte_offset": 116,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": false,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "maxM",
+        "struct": "<Q",
+        "byte_offset": 124,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "maxM0",
+        "struct": "<Q",
+        "byte_offset": 132,
+        "bits": 64,
+        "detected_header_only": 64,
+        "detected_with_body": 64,
+        "undetected_with_body": 0,
+        "detected_fraction_header_only": 1.0,
+        "detected_fraction_with_body": 1.0,
+        "load_bearing": true,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 0
+        },
+        "undetected_examples": []
+      },
+      {
+        "field": "mult",
+        "struct": "<d",
+        "byte_offset": 140,
+        "bits": 64,
+        "detected_header_only": 39,
+        "detected_with_body": 39,
+        "undetected_with_body": 25,
+        "detected_fraction_header_only": 0.609375,
+        "detected_fraction_with_body": 0.609375,
+        "load_bearing": false,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 25
+        },
+        "undetected_examples": [
+          {
+            "bit": 0,
+            "value": 0.3606737602222409,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 1,
+            "value": 0.36067376022224074,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 2,
+            "value": 0.3606737602222406,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 3,
+            "value": 0.3606737602222404,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 4,
+            "value": 0.36067376022223996,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 5,
+            "value": 0.36067376022223907,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 6,
+            "value": 0.3606737602222373,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 7,
+            "value": 0.36067376022223374,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          }
+        ]
+      },
+      {
+        "field": "ef_construction",
+        "struct": "<Q",
+        "byte_offset": 148,
+        "bits": 64,
+        "detected_header_only": 40,
+        "detected_with_body": 40,
+        "undetected_with_body": 24,
+        "detected_fraction_header_only": 0.625,
+        "detected_fraction_with_body": 0.625,
+        "load_bearing": false,
+        "escape_classes": {
+          "desync": 0,
+          "level_overrun": 0,
+          "alloc": 0,
+          "benign": 24
+        },
+        "undetected_examples": [
+          {
+            "bit": 0,
+            "value": 201,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 1,
+            "value": 202,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 2,
+            "value": 204,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 3,
+            "value": 192,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 4,
+            "value": 216,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 5,
+            "value": 232,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 6,
+            "value": 136,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          },
+          {
+            "bit": 7,
+            "value": 72,
+            "class": "benign",
+            "caught_by_body_check": false,
+            "caught_by_full_walk": false
+          }
+        ]
+      }
+    ]
+  },
+  "gate": {
+    "clean_header_accepted": true,
+    "clean_header_accepted_with_body": true,
+    "no_escaped_desync": true
+  }
+}

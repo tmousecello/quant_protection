@@ -1,0 +1,499 @@
+{
+  "experiment": "e9_miscorrection",
+  "shapes": [
+    "miscorrection_word"
+  ],
+  "strata": [
+    "rotation",
+    "centroids",
+    "ex_code",
+    "bin_code",
+    "links",
+    "factors",
+    "ids"
+  ],
+  "arms": [
+    "off",
+    "on"
+  ],
+  "shard": {
+    "is_shard": false,
+    "full_grid_strata": [
+      "rotation",
+      "centroids",
+      "ex_code",
+      "bin_code",
+      "links",
+      "factors",
+      "ids"
+    ],
+    "full_grid_rows": 420,
+    "out_tag": "v2cent_hdr"
+  },
+  "seeds": 30,
+  "cfg": {
+    "seeds": 30,
+    "ef": 64,
+    "word_bytes": 16,
+    "k_raw": 2,
+    "cliff_regions": [
+      "rotation",
+      "centroids",
+      "header"
+    ]
+  },
+  "clean_recall@10": 0.95035,
+  "cells": {
+    "miscorrection_word|rotation|off": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.609085,
+      "median_delta_recall": 0.341265,
+      "p95_delta_recall": 0.497814,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": null,
+      "median_fallbacks": null,
+      "median_cliff_repaired": null,
+      "median_oob_restored": null,
+      "outcomes": {
+        "silent_wrong": 30
+      }
+    },
+    "miscorrection_word|rotation|on": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 0.0,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": 0.0,
+      "median_fallbacks": 0.0,
+      "median_cliff_repaired": 3.0,
+      "median_oob_restored": 0.0,
+      "outcomes": {
+        "repaired": 30
+      }
+    },
+    "miscorrection_word|centroids|off": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.94575,
+      "median_delta_recall": 0.0046,
+      "p95_delta_recall": 0.106213,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": null,
+      "median_fallbacks": null,
+      "median_cliff_repaired": null,
+      "median_oob_restored": null,
+      "outcomes": {
+        "tolerated": 17,
+        "silent_wrong": 13
+      }
+    },
+    "miscorrection_word|centroids|on": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 0.0,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": 0.0,
+      "median_fallbacks": 0.0,
+      "median_cliff_repaired": 3.0,
+      "median_oob_restored": 0.0,
+      "outcomes": {
+        "repaired": 30
+      }
+    },
+    "miscorrection_word|ex_code|off": {
+      "n": 30,
+      "n_crash": 1,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 0.0,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": null,
+      "median_fallbacks": null,
+      "median_cliff_repaired": null,
+      "median_oob_restored": null,
+      "outcomes": {
+        "crash": 1,
+        "tolerated": 29
+      }
+    },
+    "miscorrection_word|ex_code|on": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 5e-06,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": 1.0,
+      "median_fallbacks": 3.0,
+      "median_cliff_repaired": 0.0,
+      "median_oob_restored": 0.0,
+      "outcomes": {
+        "tolerated": 30
+      }
+    },
+    "miscorrection_word|bin_code|off": {
+      "n": 30,
+      "n_crash": 2,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 5e-05,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": null,
+      "median_fallbacks": null,
+      "median_cliff_repaired": null,
+      "median_oob_restored": null,
+      "outcomes": {
+        "crash": 2,
+        "tolerated": 28
+      }
+    },
+    "miscorrection_word|bin_code|on": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 0.0,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": 0.0,
+      "median_fallbacks": 0.0,
+      "median_cliff_repaired": 0.0,
+      "median_oob_restored": 0.0,
+      "outcomes": {
+        "repaired": 11,
+        "tolerated": 19
+      }
+    },
+    "miscorrection_word|links|off": {
+      "n": 30,
+      "n_crash": 8,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 0.0,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": null,
+      "median_fallbacks": null,
+      "median_cliff_repaired": null,
+      "median_oob_restored": null,
+      "outcomes": {
+        "crash": 8,
+        "tolerated": 22
+      }
+    },
+    "miscorrection_word|links|on": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 0.0,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": 0.0,
+      "median_fallbacks": 0.0,
+      "median_cliff_repaired": 0.0,
+      "median_oob_restored": 1.0,
+      "outcomes": {
+        "repaired": 19,
+        "tolerated": 11
+      }
+    },
+    "miscorrection_word|factors|off": {
+      "n": 30,
+      "n_crash": 1,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 1e-05,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": null,
+      "median_fallbacks": null,
+      "median_cliff_repaired": null,
+      "median_oob_restored": null,
+      "outcomes": {
+        "crash": 1,
+        "tolerated": 29
+      }
+    },
+    "miscorrection_word|factors|on": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 1e-05,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": 0.0,
+      "median_fallbacks": 0.0,
+      "median_cliff_repaired": 0.0,
+      "median_oob_restored": 0.0,
+      "outcomes": {
+        "repaired": 2,
+        "tolerated": 28
+      }
+    },
+    "miscorrection_word|ids|off": {
+      "n": 30,
+      "n_crash": 5,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 0.000128,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": null,
+      "median_fallbacks": null,
+      "median_cliff_repaired": null,
+      "median_oob_restored": null,
+      "outcomes": {
+        "crash": 5,
+        "tolerated": 25
+      }
+    },
+    "miscorrection_word|ids|on": {
+      "n": 30,
+      "n_crash": 0,
+      "median_recall": 0.95035,
+      "median_delta_recall": 0.0,
+      "p95_delta_recall": 5e-06,
+      "median_bits_flipped": 3.0,
+      "median_coverage_bytes": 3.0,
+      "median_elements_crc_fail": 0.0,
+      "median_fallbacks": 0.0,
+      "median_cliff_repaired": 0.0,
+      "median_oob_restored": 1.0,
+      "outcomes": {
+        "repaired": 23,
+        "tolerated": 7
+      }
+    }
+  },
+  "smear": {
+    "miscorrection_word|rotation": {
+      "median_bytes_touched": 3.0,
+      "median_bytes_in_anchor_element_field": 3.0,
+      "median_fraction_in_anchor_element_field": 1.0,
+      "median_bytes_in_anchor_field": 3.0,
+      "median_fraction_in_anchor_field": 1.0,
+      "fields_hit": {
+        "rotation": 174
+      }
+    },
+    "miscorrection_word|centroids": {
+      "median_bytes_touched": 3.0,
+      "median_bytes_in_anchor_element_field": 3.0,
+      "median_fraction_in_anchor_element_field": 1.0,
+      "median_bytes_in_anchor_field": 3.0,
+      "median_fraction_in_anchor_field": 1.0,
+      "fields_hit": {
+        "centroids": 170,
+        "header": 4
+      }
+    },
+    "miscorrection_word|ex_code": {
+      "median_bytes_touched": 3.0,
+      "median_bytes_in_anchor_element_field": 3.0,
+      "median_fraction_in_anchor_element_field": 1.0,
+      "median_bytes_in_anchor_field": 3.0,
+      "median_fraction_in_anchor_field": 1.0,
+      "fields_hit": {
+        "ex_code": 154,
+        "bin_factors": 6,
+        "ex_factors": 2,
+        "links": 2
+      }
+    },
+    "miscorrection_word|bin_code": {
+      "median_bytes_touched": 3.0,
+      "median_bytes_in_anchor_element_field": 1.0,
+      "median_fraction_in_anchor_element_field": 0.5,
+      "median_bytes_in_anchor_field": 1.0,
+      "median_fraction_in_anchor_field": 0.5,
+      "fields_hit": {
+        "bin_code": 86,
+        "bin_factors": 44,
+        "cluster_id": 16,
+        "label": 16
+      }
+    },
+    "miscorrection_word|links": {
+      "median_bytes_touched": 3.0,
+      "median_bytes_in_anchor_element_field": 3.0,
+      "median_fraction_in_anchor_element_field": 1.0,
+      "median_bytes_in_anchor_field": 3.0,
+      "median_fraction_in_anchor_field": 1.0,
+      "fields_hit": {
+        "links": 154,
+        "ex_factors": 4,
+        "ex_code": 2
+      }
+    },
+    "miscorrection_word|factors": {
+      "median_bytes_touched": 3.0,
+      "median_bytes_in_anchor_element_field": 1.0,
+      "median_fraction_in_anchor_element_field": 0.333333,
+      "median_bytes_in_anchor_field": 1.0,
+      "median_fraction_in_anchor_field": 0.333333,
+      "fields_hit": {
+        "bin_code": 48,
+        "bin_factors": 42,
+        "ex_code": 36,
+        "ex_factors": 32,
+        "links": 12
+      }
+    },
+    "miscorrection_word|ids": {
+      "median_bytes_touched": 3.0,
+      "median_bytes_in_anchor_element_field": 1.0,
+      "median_fraction_in_anchor_element_field": 0.5,
+      "median_bytes_in_anchor_field": 1.0,
+      "median_fraction_in_anchor_field": 0.5,
+      "fields_hit": {
+        "bin_code": 84,
+        "cluster_id": 42,
+        "label": 42
+      }
+    }
+  },
+  "sanity": {
+    "row_count_ok": true,
+    "expected_rows": 420,
+    "rows": 420,
+    "state_leak_bytes": 0,
+    "per_eval_footprint_gate_evals": 420,
+    "final_research_drift": 0.0,
+    "stub_sandbox_ok": true
+  },
+  "adapter": "real",
+  "meta": {
+    "adapter_type": "real",
+    "platform": {
+      "machine": "x86_64",
+      "system": "Linux",
+      "hostname": "meow1",
+      "uname": [
+        "Linux",
+        "meow1",
+        "6.17.0-41-generic",
+        "#41-Ubuntu SMP PREEMPT_DYNAMIC Sat Jun 20 18:01:40 UTC 2026",
+        "x86_64"
+      ]
+    },
+    "platform_confirmed_real": false,
+    "confirmation_basis": [
+      "adapter_resolved=real",
+      "platform.machine()=x86_64",
+      "clean@10=0.95035 vs expected=0.983 -> tolerance_ok=False"
+    ],
+    "clean_baseline": {
+      "recall@10": 0.95035,
+      "expected": 0.983,
+      "diff": 0.03265,
+      "tolerance_ok": false,
+      "tol": 0.01
+    },
+    "index_geometry": {
+      "dim": 128,
+      "padded_dim": 128,
+      "num_cluster": 16,
+      "ex_bits": 6,
+      "cur_element_count": 1000000,
+      "M": 16,
+      "maxM": 16,
+      "maxM0": 32,
+      "ef_construction": 200
+    },
+    "rabitq": {
+      "library_commit": "7e39df2fcff6161af5c4a77cc3dd1709684fb52b",
+      "binaries_built_flag": true,
+      "note": "binaries_built is NOT a platform signal (stub returns True); platform is confirmed via platform_confirmed_real"
+    },
+    "study_config": {
+      "seed": 1234,
+      "k": 10,
+      "dim": 128,
+      "ef": 64,
+      "smoke": false
+    },
+    "deps": {
+      "numpy": "2.4.6",
+      "faiss": "1.14.2"
+    },
+    "units": {
+      "pct_collapse": "percent_0_100",
+      "pct_collapse_worst_bucket": "percent_0_100",
+      "pct_collapse_overall": "percent_0_100",
+      "pct_harmful": "percent_0_100",
+      "pct_crash": "percent_0_100",
+      "pct_catastrophic": "percent_0_100",
+      "pct_benign": "percent_0_100",
+      "frac_collapse_worst_bucket": "fraction_0_1",
+      "frac_collapse_overall": "fraction_0_1",
+      "p1_single_bit_collapse": "fraction_0_1",
+      "collapse_frac": "fraction_0_1",
+      "predicted": "fraction_0_1",
+      "measured": "fraction_0_1",
+      "dRecall@10": "abs_recall_delta_0_1",
+      "mean_dRecall@10": "abs_recall_delta_0_1",
+      "max_dRecall@10": "abs_recall_delta_0_1",
+      "p99_dRecall@10": "abs_recall_delta_0_1"
+    },
+    "corruption": {
+      "index_sha256": "fed2b2454a80be9e0b765913361cb89815c08bfd43093e87a78bb3904e88dd26",
+      "corrupted_regions": [
+        "rotation",
+        "centroids",
+        "ex_code",
+        "bin_code",
+        "links",
+        "factors",
+        "ids"
+      ],
+      "recovery": [
+        "off",
+        "fallback_eb"
+      ],
+      "crc_manifest_sha256": "6c6ca3f6c9a41ee7b6a4092b9f07452a4bab5ed55a322cd62e17498168328a3f"
+    },
+    "shape_weights": {
+      "path": "/home/u01/results/jonathan-vuln-shapes/shape_weights.json",
+      "present": false
+    },
+    "outcome_thresholds": {
+      "retention_tol": 0.005,
+      "delta_tol": 0.01
+    },
+    "clean_baseline_both_paths": {
+      "search_corrupted_recall@10": 0.95035,
+      "query_with_recovery_recall@10": 0.95035,
+      "abs_diff": 0.0,
+      "gate": "abs_diff <= RETENTION_TOL (0.005)"
+    },
+    "spec_deviations": {
+      "separate_driver": "E9 registers `miscorrection_word` into E6's shape dispatch instead of joining E6's SHAPES tuple, so E6's published 3x7 grid, its row-count gate and its merged CSV keep their meaning. All measurement logic (sampler, measure_cell, bounds_check_full, classifier, summarizer) is imported from E6, not copied.",
+      "operating_point": "E9 sweeps at ef=64 (clean recall@10 0.95035); E6 used ef=2000 (0.98376). delta_recall is measured against this run's own baseline through both arms' code paths, so E9 is internally consistent, but E6 and E9 deltas are not interchangeable across operating points."
+    },
+    "miscorrection_modeling": {
+      "mechanism": "DDR5 on-die ECC is SEC over 128 data + 8 parity bits per beat. A 2-bit RAW fault inside one ECC word exceeds SEC capacity and MISCORRECTS: the decoder flips a third, innocent bit. Software observes 3 wrong bits confined to one ~16 B word \u2014 a localized multi-bit burst, not a row or a stripe.",
+      "sources": {
+        "A-003": "COMET: On-die and In-controller Collaborative Memory ECC Technique, UCLA NanoCAD 2023 \u2014 128 data + 8 parity per beat; a double-bit error can miscorrect, producing a third erroneous bit within the beat boundary.",
+        "X-003": "Criss et al., Improving Memory Reliability by Bounding DRAM Faults, MEMSYS 2020, Fig. 5 \u2014 128 data bits and 8 check-bits are read per access; errors span up to 16 bits."
+      },
+      "caveat": "MODELING APPROXIMATION. The exact JEDEC JESD79-5 on-die-ECC parity-check matrix is confidential (A-GAP-03), so which bit a given double-error syndrome aliases onto cannot be reproduced; qp.faults.miscorrection_word draws the miscorrected bit uniformly within the word instead. Anchored in A-003/X-003: the 16 B word, the 2-raw -> 3-observed count, and the single-word confinement. Not anchored: the intra-word position of the miscorrected bit.",
+      "word_bytes": 16,
+      "k_raw": 2,
+      "observed_bits": 3
+    }
+  }
+}

@@ -27,7 +27,8 @@ from qp import config, metrics
 from qp.rabitq import stub_adapter as adapter
 from qp.rabitq import eb_policy, layout
 from phase3_e3c_temporal import TemporalCorruptor, PATTERNS, SMOKE_CFG, _resolve_region
-from phase3_e5_recovery import RecoveryGuard, SMOKE_CFG as E5_SMOKE_CFG, replica_lane_seed
+from phase3_e5_recovery import (RecoveryGuard, SMOKE_CFG as E5_SMOKE_CFG, replica_lane_seed,
+                                _majority_vote)
 
 
 # ---------------------------------------------------------------------------
@@ -576,6 +577,236 @@ class TestE5CliffSelfScrub:
         b = adapter.read_serialized_range(self.bs, self.bl)
         assert np.array_equal(b, full[self.bs:self.bs + self.bl]), \
             "mutating a returned array must not affect subsequent reads (fresh copy per call)"
+
+
+# ---------------------------------------------------------------------------
+# E5 cliff: the vectorized majority vote
+# ---------------------------------------------------------------------------
+
+def _reference_vote(copies, buf_region):
+    """The original per-bit triple loop, kept verbatim as the oracle for _majority_vote.
+
+    The vectorized version exists because the centroids are 8 KB against the rotation's 64, so
+    this loop's bl*8*R iterations went from 1,536 to 196,608 on a per-query path. Speed is no
+    excuse for changing what `cliff_repaired` counts: tests below assert on that number and
+    E6's classify_outcome keys `repaired` off it.
+    """
+    R, bl = len(copies), len(copies[0])
+    majority = np.zeros(bl, dtype=np.uint8)
+    repaired = 0
+    for i in range(bl):
+        for j in range(8):
+            votes = sum(1 for r in range(R) if (copies[r][i] >> j) & 1)
+            bit = 1 if votes > R // 2 else 0
+            if bit:
+                majority[i] |= (1 << j)
+            for r in range(R):
+                if ((copies[r][i] >> j) & 1) != bit:
+                    repaired += 1
+            if ((buf_region[i] >> j) & 1) != bit:
+                repaired += 1
+    return majority, repaired
+
+
+class TestCliffVoteVectorization:
+    @pytest.mark.parametrize("R", [1, 2, 3, 4, 5])
+    def test_matches_the_reference_loop_exactly(self, R):
+        """Same majority AND same repaired-bit count as the loop it replaced, every R."""
+        rng = np.random.default_rng(20260803 + R)
+        for _ in range(25):
+            bl = int(rng.integers(1, 96))
+            base = rng.integers(0, 256, bl, dtype=np.uint8)
+            copies = []
+            for _ in range(R):
+                c = base.copy()
+                for _ in range(int(rng.integers(0, 5))):
+                    c[rng.integers(bl)] ^= np.uint8(1 << rng.integers(8))
+                copies.append(c)
+            buf = base.copy()
+            for _ in range(int(rng.integers(0, 5))):
+                buf[rng.integers(bl)] ^= np.uint8(1 << rng.integers(8))
+
+            want_m, want_r = _reference_vote(copies, buf)
+            got_m, got_r = _majority_vote(copies, buf)
+            assert np.array_equal(got_m, want_m), f"majority differs at R={R}"
+            assert got_r == want_r, f"repaired_bits {got_r} != {want_r} at R={R}"
+
+    def test_clean_input_repairs_nothing(self):
+        """The steady state: identical copies and buf produce the input back, zero repairs."""
+        base = np.random.default_rng(1).integers(0, 256, 512, dtype=np.uint8)
+        majority, repaired = _majority_vote([base.copy() for _ in range(3)], base.copy())
+        assert np.array_equal(majority, base)
+        assert repaired == 0
+
+
+# ---------------------------------------------------------------------------
+# E5 cliff: more than one protected region
+# ---------------------------------------------------------------------------
+
+class TestCliffMultiRegion:
+    """The centroids joined the rotation in the cliff layer; the header followed them.
+
+    The centroids are the same structural class as the rotation — global, read by every query,
+    small enough to replicate. The header is there for a different reason: an 8 KB device row
+    anchored in the centroids covers [0, 8192) and destroys the header on the way, and load()
+    then mallocs on garbage geometry. Both are repaired by the same mechanism, so these mirror
+    the invariants the rotation-only tests above already pin.
+    """
+
+    REGIONS = ("rotation", "centroids", "header")
+
+    def _guard(self, regions=REGIONS, **over):
+        rmap = _rmap()
+        cfg = {**E5_SMOKE_CFG, "R": 3, "chunk_size": 16, "cliff_scrub": True,
+               "anchor_every": 5, "cliff_regions": tuple(regions), **over}
+        g = RecoveryGuard(adapter, cfg, rmap)
+        g.init_from_clean(_clean())
+        return g
+
+    def test_default_config_is_rotation_only(self):
+        """Every result predating the flag was produced under this default; it must not move."""
+        g = RecoveryGuard(adapter, {**E5_SMOKE_CFG, "chunk_size": 16}, _rmap())
+        g.init_from_clean(_clean())
+        assert list(g._cliff_regions) == ["rotation"]
+        assert list(g.counters()["cliff_by_region"]) == ["rotation"]
+
+    def test_duplicate_regions_are_a_loud_error(self):
+        with pytest.raises(ValueError, match="duplicate"):
+            RecoveryGuard(adapter, {**E5_SMOKE_CFG, "cliff_regions": ("rotation", "rotation")},
+                          _rmap())
+
+    def test_every_named_region_is_resolvable_and_disjoint(self):
+        g = self._guard()
+        assert list(g._cliff_regions) == list(self.REGIONS), "scrub order must follow the config"
+        spans = sorted((bs, bs + bl) for bs, bl in g._cliff_regions.values())
+        for (_, end), (start, _) in zip(spans, spans[1:]):
+            assert end <= start, f"cliff regions overlap: {spans}"
+
+    def test_rotation_aliases_still_address_the_rotation(self):
+        """--inject-replicas and the rotation tests reach in by these names; they must survive."""
+        g = self._guard()
+        assert g._rot_region == g._cliff_regions["rotation"]
+        assert g._rot_copies is g._cliff_copies["rotation"]
+        assert g.rotation_replicas() is g._cliff_copies["rotation"]
+        g._rot_clean_crc = 12345                       # the anchor tests assign to this
+        assert g._cliff_crc["rotation"] == 12345
+
+    def test_flat_counters_are_the_per_region_sum(self):
+        g = self._guard()
+        buf = _clean()
+        g._cliff_copies["centroids"][0][0] ^= 0b00000111
+        g._cliff_copies["header"][0][0] ^= 0b00000001
+        g._scrub_cliff(buf)
+        ctr = g.counters()
+        by = ctr["cliff_by_region"]
+        for key, flat in (("repaired", "cliff_repaired"), ("checked", "cliff_checked")):
+            assert ctr[flat] == sum(v[key] for v in by.values()), \
+                f"{flat} must be the sum over regions"
+        assert by["centroids"]["repaired"] == 3
+        assert by["header"]["repaired"] == 1
+        assert by["rotation"]["repaired"] == 0, "an untouched region must not be credited"
+
+    def test_no_change_on_pristine_buf(self):
+        """The negative control: the new regions must not become a source of damage themselves."""
+        g = self._guard()
+        buf = _clean()
+        g._scrub_cliff(buf)
+        assert np.array_equal(buf, _clean())
+        assert g._cliff_repaired == 0 and g._cliff_irrecoverable == 0
+
+    @pytest.mark.parametrize("region", ["centroids", "header"])
+    def test_majority_vote_repairs_buffer_damage(self, region):
+        """Damage in buf alone (replicas clean) is voted out — the single_cell/miscorrection case."""
+        g = self._guard()
+        buf = _clean()
+        bs, _ = g._cliff_regions[region]
+        buf[bs] ^= 0b00000111
+        g._scrub_cliff(buf)
+        assert np.array_equal(buf, _clean()), f"{region} damage not repaired"
+        assert g.counters()["cliff_by_region"][region]["repaired"] == 3
+
+    @pytest.mark.parametrize("region", ["centroids", "header"])
+    def test_repair_prevents_accumulation(self, region):
+        """Repeated single-byte damage never accumulates: each scrub returns buf to clean."""
+        g = self._guard()
+        buf = _clean()
+        bs, bl = g._cliff_regions[region]
+        for i in range(6):
+            buf[bs + (i * 3) % bl] ^= 0b00000001
+            g._scrub_cliff(buf)
+            assert np.array_equal(buf, _clean()), f"{region} damage survived scrub {i}"
+
+    @pytest.mark.parametrize("region", ["centroids", "header"])
+    def test_vote_failure_does_not_poison_buf(self, region):
+        """>= majority copies wrong the same way: reload from disk, never write a wrong majority."""
+        g = self._guard()
+        buf = _clean()
+        bs, bl = g._cliff_regions[region]
+        g._cliff_copies[region][0][0] ^= 0b00000001
+        g._cliff_copies[region][1][0] ^= 0b00000001
+        g._scrub_cliff(buf)
+        by = g.counters()["cliff_by_region"][region]
+        assert by["vote_fail_reloads"] == 1 and by["reload_triggered"] == 1
+        assert by["irrecoverable"] == 0, "a recovered event is not irrecoverable"
+        assert np.array_equal(buf, _clean()), "the wrong majority must never reach buf"
+        for cp in g._cliff_copies[region]:
+            assert np.array_equal(cp, _clean()[bs:bs + bl]), "replicas not reloaded"
+
+    @pytest.mark.parametrize("region", ["centroids", "header"])
+    def test_reload_reads_persistent_source_not_dram_snapshot(self, region):
+        """The §1.3 durability invariant, mirrored for the new regions.
+
+        A DRAM cache of the clean bytes would just be a fourth replica under the same fault
+        process, which is why __init__ refuses cliff_scrub without read_serialized_range. Poison
+        the in-memory snapshot and require the reload to ignore it.
+        """
+        g = self._guard()
+        buf = _clean()
+        bs, bl = g._cliff_regions[region]
+        persistent = np.asarray(adapter.serialize_index()[bs:bs + bl], dtype=np.uint8)
+        g._clean_buf[bs + 5] ^= 0b00001000                  # poison, away from the vote hit
+        assert g._clean_buf[bs + 5] != persistent[5]
+        g._cliff_copies[region][0][0] ^= 0b00000001
+        g._cliff_copies[region][1][0] ^= 0b00000001
+
+        g._scrub_cliff(buf)
+
+        assert np.array_equal(buf[bs:bs + bl], persistent), \
+            "reload must restore persistent bytes, not the poisoned DRAM snapshot"
+        assert buf[bs + 5] == persistent[5], "poisoned snapshot byte leaked into the reload"
+
+    def test_anchor_checks_every_region(self):
+        """The low-frequency backstop must cover what the vote covers, not just the rotation."""
+        g = self._guard()
+        buf = _clean()
+        bs, _ = g._cliff_regions["centroids"]
+        buf[bs] ^= 0b00000001                               # damage buf only, replicas clean
+        g.cliff_anchor_if_due(buf, tick=5)
+        by = g.counters()["cliff_by_region"]
+        assert all(v["anchor_checked"] == 1 for v in by.values()), \
+            "every protected region must be anchored, not only the rotation"
+        assert by["centroids"]["anchor_mismatch"] == 1
+        assert by["rotation"]["anchor_mismatch"] == 0
+        assert np.array_equal(buf, _clean())
+
+    def test_whole_header_plus_centroid_block_is_repaired(self):
+        """The device_row x centroids cell: 8 KB from offset 0 wipes header AND centroids.
+
+        This is the fault that crashes 29 of 30 protected seeds today, and it is why both
+        regions are in the list — repairing either alone leaves the other's damage behind.
+        """
+        g = self._guard()
+        buf = _clean()
+        span = min(8192, buf.size)
+        rng = np.random.default_rng(0)
+        buf[:span] ^= rng.integers(1, 256, span, dtype=np.uint8)
+        assert not np.array_equal(buf, _clean())
+        g._scrub_cliff(buf)
+        protected = np.zeros(buf.size, dtype=bool)
+        for bs, bl in g._cliff_regions.values():
+            protected[bs:bs + bl] = True
+        residual = np.flatnonzero((buf != _clean()) & protected)
+        assert residual.size == 0, f"{residual.size} protected bytes left corrupted"
 
 
 # ---------------------------------------------------------------------------

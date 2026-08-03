@@ -1,0 +1,286 @@
+{
+  "e6_centroids": {
+    "single_cell|v2cent|off": {
+      "crash": 0,
+      "silent_wrong": 7,
+      "detected_wrong": 0,
+      "repaired": 0,
+      "tolerated": 23
+    },
+    "single_cell|v2cent|on": {
+      "crash": 0,
+      "silent_wrong": 0,
+      "detected_wrong": 0,
+      "repaired": 30,
+      "tolerated": 0
+    },
+    "single_cell|v2cent_hdr|off": {
+      "crash": 0,
+      "silent_wrong": 7,
+      "detected_wrong": 0,
+      "repaired": 0,
+      "tolerated": 23
+    },
+    "single_cell|v2cent_hdr|on": {
+      "crash": 0,
+      "silent_wrong": 0,
+      "detected_wrong": 0,
+      "repaired": 30,
+      "tolerated": 0
+    },
+    "device_row|v2cent|off": {
+      "crash": 30,
+      "silent_wrong": 0,
+      "detected_wrong": 0,
+      "repaired": 0,
+      "tolerated": 0
+    },
+    "device_row|v2cent|on": {
+      "crash": 29,
+      "silent_wrong": 0,
+      "detected_wrong": 1,
+      "repaired": 0,
+      "tolerated": 0
+    },
+    "device_row|v2cent_hdr|off": {
+      "crash": 30,
+      "silent_wrong": 0,
+      "detected_wrong": 0,
+      "repaired": 0,
+      "tolerated": 0
+    },
+    "device_row|v2cent_hdr|on": {
+      "crash": 0,
+      "silent_wrong": 0,
+      "detected_wrong": 1,
+      "repaired": 29,
+      "tolerated": 0
+    },
+    "device_column|v2cent|off": {
+      "crash": 18,
+      "silent_wrong": 3,
+      "detected_wrong": 0,
+      "repaired": 0,
+      "tolerated": 9
+    },
+    "device_column|v2cent|on": {
+      "crash": 0,
+      "silent_wrong": 0,
+      "detected_wrong": 0,
+      "repaired": 0,
+      "tolerated": 30
+    },
+    "device_column|v2cent_hdr|off": {
+      "crash": 18,
+      "silent_wrong": 3,
+      "detected_wrong": 0,
+      "repaired": 0,
+      "tolerated": 9
+    },
+    "device_column|v2cent_hdr|on": {
+      "crash": 0,
+      "silent_wrong": 0,
+      "detected_wrong": 0,
+      "repaired": 0,
+      "tolerated": 30
+    }
+  },
+  "e6_rotation_regression": {
+    "per_shape": {
+      "single_cell": {
+        "new": {
+          "crash": 0,
+          "silent_wrong": 0,
+          "detected_wrong": 0,
+          "repaired": 30,
+          "tolerated": 0
+        },
+        "baseline": {
+          "crash": 0,
+          "silent_wrong": 0,
+          "detected_wrong": 0,
+          "repaired": 30,
+          "tolerated": 0
+        },
+        "match": true
+      },
+      "device_row": {
+        "new": {
+          "crash": 0,
+          "silent_wrong": 0,
+          "detected_wrong": 30,
+          "repaired": 0,
+          "tolerated": 0
+        },
+        "baseline": {
+          "crash": 0,
+          "silent_wrong": 0,
+          "detected_wrong": 30,
+          "repaired": 0,
+          "tolerated": 0
+        },
+        "match": true
+      },
+      "device_column": {
+        "new": {
+          "crash": 0,
+          "silent_wrong": 0,
+          "detected_wrong": 0,
+          "repaired": 30,
+          "tolerated": 0
+        },
+        "baseline": {
+          "crash": 0,
+          "silent_wrong": 0,
+          "detected_wrong": 0,
+          "repaired": 30,
+          "tolerated": 0
+        },
+        "match": true
+      }
+    },
+    "all_match": true
+  },
+  "e9": [
+    {
+      "region": "rotation",
+      "off": {
+        "crash": 0,
+        "silent_wrong": 30,
+        "detected_wrong": 0,
+        "repaired": 0,
+        "tolerated": 0
+      },
+      "on": {
+        "crash": 0,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 30,
+        "tolerated": 0
+      }
+    },
+    {
+      "region": "centroids",
+      "off": {
+        "crash": 0,
+        "silent_wrong": 13,
+        "detected_wrong": 0,
+        "repaired": 0,
+        "tolerated": 17
+      },
+      "on": {
+        "crash": 0,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 30,
+        "tolerated": 0
+      }
+    },
+    {
+      "region": "ex_code",
+      "off": {
+        "crash": 1,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 0,
+        "tolerated": 29
+      },
+      "on": {
+        "crash": 0,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 0,
+        "tolerated": 30
+      }
+    },
+    {
+      "region": "bin_code",
+      "off": {
+        "crash": 2,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 0,
+        "tolerated": 28
+      },
+      "on": {
+        "crash": 0,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 11,
+        "tolerated": 19
+      }
+    },
+    {
+      "region": "links",
+      "off": {
+        "crash": 8,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 0,
+        "tolerated": 22
+      },
+      "on": {
+        "crash": 0,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 19,
+        "tolerated": 11
+      }
+    },
+    {
+      "region": "factors",
+      "off": {
+        "crash": 1,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 0,
+        "tolerated": 29
+      },
+      "on": {
+        "crash": 0,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 2,
+        "tolerated": 28
+      }
+    },
+    {
+      "region": "ids",
+      "off": {
+        "crash": 5,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 0,
+        "tolerated": 25
+      },
+      "on": {
+        "crash": 0,
+        "silent_wrong": 0,
+        "detected_wrong": 0,
+        "repaired": 23,
+        "tolerated": 7
+      }
+    }
+  ],
+  "falsification": {
+    "repaired_trials": 174,
+    "repaired_without_recall_return": 0,
+    "protected_crashes_remaining": 0,
+    "protected_silent_wrong_remaining": 0,
+    "repair_attribution": {
+      "rotation": {
+        "trials_acting": 30,
+        "bits": 90
+      },
+      "centroids": {
+        "trials_acting": 120,
+        "bits": 932919
+      },
+      "header": {
+        "trials_acting": 30,
+        "bits": 18144
+      }
+    },
+    "rotation_regression_clean": true
+  }
+}

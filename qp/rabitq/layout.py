@@ -32,6 +32,7 @@ provenance on every region: located="source-derived" (from the pinned library so
 verified_against_index is False here because that requires a built index (x86-64 build);
 parse_header() upgrades the size fields to "header-parsed" when given a real index file.
 """
+import math
 import struct
 
 import numpy as np
@@ -126,6 +127,223 @@ def parse_header(source):
         out[name] = struct.unpack_from(code, raw, off)[0]
         off += struct.calcsize(code)
     return out
+
+
+# --- header validity ---------------------------------------------------------
+#
+# HierarchicalNSW::load() (hnsw.hpp L769-819) reads all 21 fields with no validation and then
+# mallocs and reads on the values it just read:
+#     malloc(num_cluster_ * padded_dim_ * sizeof(float))
+#     malloc(max_elements_ * size_data_per_element_)
+# So a flip in a size or count field is not a wrong answer, it is an allocation on garbage —
+# which is why a device row anchored in the centroids (the 8 KB block starts at byte 156, so a
+# buffer-aligned row covers [0, 8192) and takes the header with it) crashes rather than
+# degrades. Replication cannot help: load() parses these into scalar members once and never
+# re-reads them, so what they need is a validity predicate at load time, the same shape as the
+# framing guard on the upper-link length words.
+#
+# Constraints are tagged:
+#   "invariant" — derivable from what save() can emit, so it cannot reject a legitimate index
+#   "policy"    — a plausibility bound with no structural backing (documented as such, because
+#                 a reader is entitled to know which checks are provable and which are chosen)
+
+MAX_PLAUSIBLE_ALLOC = 1 << 40      # 1 TiB; policy bound on max_elements * size_data_per_element
+MAX_PLAUSIBLE_LEVEL = 64           # policy bound on maxlevel (hnswlib grows it logarithmically)
+MAX_EX_BITS = 16                   # ex_bits selects an ipfunc; the library defines no more
+
+
+def _c(name, kind, fn):
+    return (name, kind, fn)
+
+
+HEADER_CONSTRAINTS = [
+    # --- structural invariants: each mirrors a formula save() itself obeyed ---
+    _c("padded_dim_is_dim_rounded", "invariant",
+       lambda h, fs: h["dim"] > 0 and h["padded_dim"] == round_up_to_multiple(h["dim"], 64)),
+    _c("count_within_capacity", "invariant",
+       lambda h, fs: 0 < h["cur_element_count"] <= h["max_elements"]),
+    _c("enterpoint_in_range", "invariant",
+       lambda h, fs: 0 <= h["enterpoint_node"] < h["cur_element_count"]),
+    _c("maxlevel_sane", "invariant",
+       lambda h, fs: 0 <= h["maxlevel"] <= MAX_PLAUSIBLE_LEVEL),
+    _c("maxM_matches_M", "invariant",
+       lambda h, fs: h["maxM"] == h["M"] and h["maxM0"] == 2 * h["M"] and h["M"] > 0),
+    _c("size_links_level0_formula", "invariant",
+       lambda h, fs: h["size_links_level0"] == size_links_level0(h["maxM0"])),
+    _c("size_links_per_element_formula", "invariant",
+       lambda h, fs: h["size_links_per_element"] == h["maxM"] * PID + PID),
+    _c("ex_bits_in_range", "invariant",
+       lambda h, fs: 0 <= h["ex_bits"] <= MAX_EX_BITS),
+    _c("size_bin_data_formula", "invariant",
+       lambda h, fs: h["size_bin_data"] == bin_data_bytes(h["padded_dim"])),
+    _c("size_ex_data_formula", "invariant",
+       lambda h, fs: h["size_ex_data"] == ex_data_bytes(h["padded_dim"], h["ex_bits"])),
+    _c("label_offset_formula", "invariant",
+       lambda h, fs: h["label_offset"] == h["size_links_level0"] + PID),
+    _c("offset_bin_formula", "invariant",
+       lambda h, fs: h["offsetBinData"] == h["size_links_level0"] + 2 * PID),
+    _c("offset_ex_formula", "invariant",
+       lambda h, fs: h["offsetExData"] == h["offsetBinData"] + h["size_bin_data"]),
+    _c("element_blocks_fit", "invariant",
+       lambda h, fs: (h["offsetBinData"] + h["size_bin_data"] <= h["size_data_per_element"]
+                      and h["offsetExData"] + h["size_ex_data"] <= h["size_data_per_element"])),
+    _c("size_data_per_element_formula", "invariant",
+       lambda h, fs: h["size_data_per_element"] == (h["size_links_level0"] + 2 * PID
+                                                    + h["size_bin_data"] + h["size_ex_data"])),
+    _c("mult_matches_M", "invariant",
+       lambda h, fs: abs(h["mult"] - 1.0 / math.log(h["M"])) <= 1e-9 * max(1.0, abs(h["mult"]))),
+    # The global one. save() writes, in order: header, centroids, level0, then one
+    # [uint32 len][len bytes] record per element, then the rotation. Everything but the
+    # upper-link records has a closed form, so the residual IS the upper-link block — and it
+    # cannot be smaller than the one length word per element that save() always emits. Any
+    # high-bit flip in a count or size field overshoots the file immediately.
+    _c("file_size_accounts", "invariant",
+       lambda h, fs: fs is None or (
+           fs - HEADER_BYTES
+           - h["num_cluster"] * h["padded_dim"] * FLOAT
+           - h["cur_element_count"] * h["size_data_per_element"]
+           - rotation_bytes(h["padded_dim"])) >= LEN_WORD_BYTES * h["cur_element_count"]),
+    # --- policy bounds: plausibility, not provable from save() ---
+    _c("num_cluster_plausible", "policy",
+       lambda h, fs: 0 < h["num_cluster"] <= 1 << 24),
+    _c("level0_alloc_plausible", "policy",
+       lambda h, fs: 0 < h["max_elements"] * h["size_data_per_element"] <= MAX_PLAUSIBLE_ALLOC),
+    _c("ef_construction_plausible", "policy",
+       lambda h, fs: 0 < h["ef_construction"] <= 1 << 24),
+]
+
+
+def validate_header(hdr, file_size=None):
+    """Names of the header constraints `hdr` violates; empty list means the header is valid.
+
+    `file_size` enables the strongest single check (`file_size_accounts`); pass it whenever it
+    is known, which on any real load path it is. A constraint whose arithmetic raises — a zero
+    divisor, a domain error from log(0), an overflow — counts as violated, because a header
+    that makes the layout arithmetic blow up is exactly the header this is here to reject.
+
+    Single-sourced on purpose: the harness guard in E6/E9, the exhaustive coverage analysis in
+    phase3_e10_header.py, and the C++ load()-side patch all state the same predicate, so they
+    cannot drift apart.
+    """
+    bad = []
+    for name, _kind, fn in HEADER_CONSTRAINTS:
+        try:
+            ok = bool(fn(hdr, file_size))
+        except (ZeroDivisionError, ValueError, OverflowError, KeyError, TypeError):
+            ok = False
+        if not ok:
+            bad.append(name)
+    return bad
+
+
+def header_is_valid(hdr, file_size=None):
+    """True iff `hdr` violates no constraint. Convenience wrapper over validate_header."""
+    return not validate_header(hdr, file_size)
+
+
+def first_upper_link_offset(hdr):
+    """Absolute file offset of the first upper-link length word, per `hdr`'s geometry.
+
+    save() writes header, centroids, level0, then one [uint32 len][len bytes] record per
+    element. load() re-reads that stream sequentially, so this offset is a pure function of
+    three header fields — and a flip in any of them moves it.
+    """
+    return (HEADER_BYTES
+            + hdr["num_cluster"] * hdr["padded_dim"] * FLOAT
+            + hdr["cur_element_count"] * hdr["size_data_per_element"])
+
+
+def valid_link_lengths(hdr):
+    """The set of upper-link record lengths save() can emit under `hdr`.
+
+    An element sits on levels 1..L for some 0 <= L <= maxlevel, and writes
+    L * size_links_per_element bytes (0 when it has no upper levels). This is the same bound
+    the framing guard applies per element (see results/.../patches/framing-guard.patch), which
+    on the SIFT b=7 geometry admits exactly {0, 68, 136, 204, 272, 340}.
+    """
+    slpe = hdr["size_links_per_element"]
+    return {k * slpe for k in range(int(hdr["maxlevel"]) + 1)}
+
+
+BODY_CHECK_RECORDS = 64     # upper-link records the body cross-check walks; see below
+
+
+def validate_header_with_body(hdr, buf, file_size=None, records=BODY_CHECK_RECORDS):
+    """validate_header plus a cross-check against the bytes the header claims to describe.
+
+    The header-only predicate cannot catch every flip, and the exhaustive enumeration in
+    phase3_e10_header.py says exactly which ones escape it. They divide in two:
+
+      * flips to a value a legitimate index could genuinely hold — another valid entry point,
+        another plausible maxlevel, a larger max_elements. No predicate can reject these
+        without also rejecting legitimate indexes, which is the bar the framing guard set.
+      * flips that MOVE A COMPUTED OFFSET: cur_element_count down, or num_cluster up. Those
+        desync load()'s sequential read, so every later record and the rotation come from the
+        wrong place — the silent-collapse mode of sec:eval-framing, reached through the header
+        instead of through a length word.
+
+    The second class is what this closes, by walking the upper-link record chain the way
+    load() will: read a length, skip that many bytes, read the next. If the geometry is right
+    every length is one save() could have emitted. If the stream is misaligned the walk is
+    reading level0 payload, and one payload word can pass for a length by luck — a chain of
+    them cannot. `records` bounds the walk so the cost stays flat on a 1M-element index; 64 was
+    enough to close every desync case on the SIFT b=7 geometry (phase3_e10_header.py reports
+    the residual, so this stays a measured number rather than an assumed one).
+
+    `records=None` walks every record and additionally requires the stream to land EXACTLY
+    where the rotation starts — the framing guard's check 4, which is what closes the last
+    num_cluster cases (a chain entered mid-stream can stay self-consistent indefinitely, but it
+    cannot also end in the right place). That costs a pass over cur_element_count records, so
+    the bounded walk is the default and the full one is opt-in.
+
+    Returns the violated-constraint names; "upper_link_framing" marks this cross-check.
+    """
+    bad = validate_header(hdr, file_size)
+    valid = valid_link_lengths(hdr)
+    # The records must all live before the rotation, which save() writes last.
+    limit = min((file_size if file_size is not None else len(buf))
+                - rotation_bytes(hdr["padded_dim"]), len(buf))
+    n = int(hdr["cur_element_count"])
+    walk_all = records is None
+    steps = n if walk_all else min(int(records), n)
+    off = first_upper_link_offset(hdr)
+    ep = int(hdr["enterpoint_node"])
+    longest, ep_len = 0, None
+    for i in range(steps):
+        if off < 0 or off + LEN_WORD_BYTES > limit:
+            bad.append("upper_link_offset_out_of_file")
+            return bad
+        word = int.from_bytes(bytes(buf[off: off + LEN_WORD_BYTES]), "little")
+        if word not in valid:
+            bad.append("upper_link_framing")
+            return bad
+        longest = max(longest, word)
+        if i == ep:
+            ep_len = word
+        off += LEN_WORD_BYTES + word
+    if walk_all:
+        top = int(hdr["maxlevel"]) * hdr["size_links_per_element"]
+        if off != limit:
+            # Trailing or missing bytes: the records consumed the wrong amount, so the rotation
+            # would be read from the wrong offset even though every length looked legal.
+            bad.append("upper_link_not_exactly_at_rotation")
+        elif longest != top:
+            # maxlevel_ is the top of the descent, and save() gave the entry point a record with
+            # exactly that many levels. So the longest record in the file pins maxlevel exactly.
+            # A raised maxlevel makes the search call get_linklist for a level no element has,
+            # which reads past that element's link list — free to catch here, since the walk has
+            # already seen every length.
+            bad.append("maxlevel_exceeds_longest_record")
+        elif ep_len != top:
+            # The descent starts AT enterpoint_node and immediately asks it for level maxlevel.
+            # So the entry point must itself be a top-level element, and on this index exactly
+            # one is (the length histogram is {0: 937001, 68: 59126, ..., 340: 1}). This is the
+            # check that catches a flip to another LEGITIMATE element id: the value is a valid
+            # id, so no bound on the field can reject it, but the element it names has a shorter
+            # link list and the descent reads past the end of it. Measured: such a flip segfaults
+            # the stock binary (exit -11), so "a valid id" is not the same as "a safe id".
+            bad.append("enterpoint_is_not_a_top_level_element")
+    return bad
 
 
 # --- region construction -----------------------------------------------------

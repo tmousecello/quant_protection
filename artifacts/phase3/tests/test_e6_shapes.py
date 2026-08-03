@@ -712,3 +712,87 @@ def test_p3_comparison_runs_on_stub(tmp_path):
         assert mode["n_seeds"] == 2
         assert "median_delta_recall_off" in mode
         assert "median_elements_crc_fail" in mode
+
+
+# ---------------------------------------------------------------------------
+# --cliff-regions: which global regions arm ON protects
+# ---------------------------------------------------------------------------
+
+def test_cliff_regions_default_is_rotation_only():
+    """Every shard produced before this flag existed ran under this default."""
+    assert e6.CLIFF_REGIONS_DEFAULT == ("rotation",)
+    args = _smoke_args("/tmp/unused")
+    assert getattr(args, "cliff_regions", None) is None
+    # setup_context resolves the default even when the namespace has no such attribute at all,
+    # which is how the pre-existing tests keep working unchanged.
+    assert tuple(getattr(args, "cliff_regions", None) or e6.CLIFF_REGIONS_DEFAULT) == ("rotation",)
+
+
+def test_cliff_regions_cli_rejects_a_typo(capsys):
+    """A silent fallback here would report centroid numbers produced without centroid protection."""
+    with pytest.raises(SystemExit):
+        e6.main(["--adapter", "stub", "--smoke", "--cliff-regions", "rotation,centriods"])
+    assert "unknown cliff region" in capsys.readouterr().err
+
+
+def test_cliff_regions_cli_rejects_a_stratum_that_is_not_a_cliff_region(capsys):
+    """`links` is a valid stratum but not a global region; the two vocabularies must not blur."""
+    with pytest.raises(SystemExit):
+        e6.main(["--adapter", "stub", "--smoke", "--cliff-regions", "links"])
+    assert "unknown cliff region" in capsys.readouterr().err
+
+
+def test_every_allowed_cliff_region_is_in_the_region_map(rmap):
+    """A name the flag accepts must be resolvable, or the sweep dies mid-run rather than at parse."""
+    names = {r["name"] for r in rmap["regions"]}
+    for region in e6.CLIFF_REGIONS_ALLOWED:
+        assert region in names, f"{region} is offered by --cliff-regions but not in the region map"
+
+
+@pytest.fixture(scope="module")
+def cliff_run(tmp_path_factory):
+    """A smoke sweep with the centroids and header protected, restricted to the cells they change."""
+    out = str(tmp_path_factory.mktemp("e6_cliff"))
+    args = _smoke_args(out)
+    args.strata, args.out_tag = ("centroids",), "cliff"
+    args.cliff_regions = ("rotation", "centroids", "header")
+    return out, e6.run(args)
+
+
+def test_cliff_regions_reach_the_summary_provenance(cliff_run):
+    """A reader must be able to tell which configuration produced a given shard."""
+    _, summary = cliff_run
+    assert tuple(summary["cfg"]["cliff_regions"]) == ("rotation", "centroids", "header")
+
+
+def test_centroid_protection_converts_the_crash_and_silent_cells(cliff_run):
+    """Arm ON must no longer crash or go silently wrong anywhere in the centroid column.
+
+    Arm OFF is the control and is expected to keep crashing: the flag configures protection,
+    not the fault.
+    """
+    out, _ = cliff_run
+    with open(os.path.join(out, "e6_results_cliff.csv")) as fh:
+        rows = list(csv.DictReader(fh))
+    on = [r for r in rows if r["arm"] == "on"]
+    off = [r for r in rows if r["arm"] == "off"]
+    assert on and off
+    assert not [r for r in on if r["outcome"] in ("crash", "silent_wrong")], \
+        f"protected centroid cells still failing: {[r['outcome'] for r in on]}"
+    assert [r for r in off if r["outcome"] == "crash"], \
+        "the unprotected arm should still crash — otherwise the fault is not being injected"
+
+
+def test_raw_records_attribute_the_repair_to_a_region(cliff_run):
+    """With three protected regions the flat counter cannot say which one acted."""
+    out, _ = cliff_run
+    with open(os.path.join(out, "raw", "e6_cliff.records.jsonl")) as fh:
+        recs = [json.loads(line) for line in fh]
+    on = [r for r in recs if r["arm"] == "on"]
+    assert on, "no protected records"
+    assert all(set(r["cliff_by_region"]) == {"rotation", "centroids", "header"} for r in on)
+    assert all(r["cliff_repaired"] == sum(r["cliff_by_region"].values()) for r in on), \
+        "the flat cliff_repaired must be the per-region sum"
+    off = [r for r in recs if r["arm"] == "off"]
+    assert all(r["cliff_by_region"] is None for r in off), \
+        "arm off measures nothing, so it must report None rather than a measured zero"

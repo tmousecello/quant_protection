@@ -118,6 +118,26 @@ DELTA_TOL = 0.01
 # check has nothing to be periodic over.
 GUARD_CFG = {"R": 3, "cliff_scrub": True, "anchor_every": 0, "chunk_size": 4096}
 
+# Which global regions the cliff layer protects, overridable with --cliff-regions. The default
+# is the rotation alone, which is what every result before this flag existed was produced under.
+#
+# The other two entries are the centroid gap, and they are two different problems that happen to
+# share a row in the outcome table:
+#   centroids  8 KB at offset 156, read by every query when it builds q_to_centroids — the same
+#              structural class as the rotation, and it fails the same way (one to three flipped
+#              bytes cost 4-11% recall with no signal at all).
+#   header     156 B at offset 0. NOT where the centroids live, contrary to the reading that
+#              produced the "index header" explanation. It matters because an 8 KB device row
+#              anchored in the centroids is aligned to the buffer start (qp.faults), so it
+#              covers [0, 8192) and takes the header with it; load() then mallocs on garbage
+#              geometry and dies. Replication cannot be justified for the header by the
+#              per-query argument — load() parses it into scalars once and never re-reads it —
+#              but the cliff scrub runs immediately before deserialize_index, which is exactly
+#              when a load-time check wants to run. See phase3_e10_header.py for the predicate
+#              a loader WITHOUT a pristine source has to fall back on instead.
+CLIFF_REGIONS_DEFAULT = ("rotation",)
+CLIFF_REGIONS_ALLOWED = ("rotation", "centroids", "header")
+
 RECOVERY_MODE = "fallback_eb"
 MANIFEST_FIELD = "ex_code"
 
@@ -526,6 +546,10 @@ def setup_context(args, cfg, prefix="e6"):
     `prefix` names the output files (E9 reuses this whole preflight verbatim and only wants its
     own filenames); every gate below is identical for both drivers.
     """
+    # Resolved here rather than in each run() so E6, E9 and the P3 comparison cannot disagree
+    # about what arm ON contains; it lands in cfg and therefore in the summary's provenance.
+    cfg["cliff_regions"] = tuple(getattr(args, "cliff_regions", None) or CLIFF_REGIONS_DEFAULT)
+
     adapter = get_adapter(args.adapter)
     aname = adapter_name(adapter)
     out = os.path.abspath(args.out)
@@ -690,13 +714,15 @@ def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm, scrat
 
     guard = None
     if arm == "on":
-        guard = RecoveryGuard(adapter, {**GUARD_CFG, "ef": int(cfg["ef"]), "seed": int(seed)},
+        guard = RecoveryGuard(adapter, {**GUARD_CFG, "ef": int(cfg["ef"]), "seed": int(seed),
+                                        "cliff_regions": tuple(cfg["cliff_regions"])},
                               ctx["rmap"])
         guard.init_from_clean(ctx["clean_buf"])          # snapshot BEFORE any corruption
 
     positions, record = inject_shape(work, shape, anchor["anchor_byte"],
                                      lane_seed(seed, LANE_INJECT), **kwargs)
     recall = elements_crc_fail = fallbacks = cliff_repaired = oob_restored = None
+    cliff_by_region = None
     guard_oob = oob_detail = None
     crashed, error = False, ""
     try:
@@ -733,6 +759,12 @@ def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm, scrat
         if guard is not None:
             ctr = guard.counters()                       # counters are valid even after a crash
             cliff_repaired = int(ctr["cliff_repaired"])
+            # With more than one protected region the flat counter no longer says WHICH one
+            # acted, and the centroid cells specifically need that: a device row there damages
+            # the header and the centroids together, so "repaired" without attribution cannot
+            # distinguish the two fixes.
+            cliff_by_region = {n: int(v["repaired"])
+                               for n, v in ctr.get("cliff_by_region", {}).items()}
             guard_oob = int(ctr["oob_elements"])
             if guard_oob:
                 log(f"[e6] [warn] guard's sampled bounds check flagged {guard_oob} field(s) "
@@ -757,7 +789,8 @@ def measure_cell(ctx, work, shape, stratum, seed_index, seed, anchor, arm, scrat
         "outcome": outcome, "bits_flipped": int(record["bits_flipped"]),
         "coverage_bytes": int(record["bytes_touched"]),
         "elements_crc_fail": elements_crc_fail, "fallbacks": fallbacks,
-        "cliff_repaired": cliff_repaired, "oob_restored": oob_restored,
+        "cliff_repaired": cliff_repaired, "cliff_by_region": cliff_by_region,
+        "oob_restored": oob_restored,
         # --- context beyond the CSV: where the damage actually landed -------------------
         "element": anchor["element"], "anchor_byte": int(anchor["anchor_byte"]),
         "anchor_window": list(anchor["window"]), "anchor_window_index": anchor["window_index"],
@@ -1052,7 +1085,8 @@ def run_p3(args):
                         stats = None
                     else:
                         guard = RecoveryGuard(ctx["adapter"],
-                                              {**GUARD_CFG, "ef": int(cfg["ef"]), "seed": seed},
+                                              {**GUARD_CFG, "ef": int(cfg["ef"]), "seed": seed,
+                                               "cliff_regions": tuple(cfg["cliff_regions"])},
                                               ctx["rmap"])
                         guard.init_from_clean(ctx["clean_buf"])
                         oob, _ = bounds_check_full(work, ctx["clean_buf"], ctx["rmap"])
@@ -1141,6 +1175,13 @@ def main(argv=None):
                     help=f"comma-separated subset of {list(STRATA)}; same sharding purpose. "
                          f"Cell seeds are (root, shape, stratum, i)-derived, so a shard's "
                          f"anchors and flips are identical to the full grid's.")
+    ap.add_argument("--cliff-regions", dest="cliff_regions",
+                    type=csv_list("cliff region", CLIFF_REGIONS_ALLOWED), default=None,
+                    help=f"comma-separated subset of {list(CLIFF_REGIONS_ALLOWED)} that arm ON "
+                         f"replicates and majority-votes (default {list(CLIFF_REGIONS_DEFAULT)}, "
+                         f"which reproduces every result predating this flag). Pair with "
+                         f"--out-tag: the centroid ablation is two runs of this flag, not two "
+                         f"new arms.")
     ap.add_argument("--p3-seeds", dest="p3_seeds", type=int, default=None)
     ap.add_argument("--seed", type=int, default=config.SEED, help="root seed")
     ap.add_argument("--ef", type=int, default=None)

@@ -10,8 +10,14 @@ Interface contract (§1 of Stage-2 brief):
   scrub_if_due(buf, tick)             — lazy batch reload when slope corruption > threshold
 
 Layer behaviour:
-  Cliff (rotation, 64 B, global):
-    Maintains R=3 copies. Per-query majority-vote + CRC verify → repair buf + copies.
+  Cliff (global shared structures, chosen by cfg["cliff_regions"]):
+    rotation   64 B, read by every query — the original and the reason for the layer.
+    centroids  8 KB at offset 156, also read by every query (q_to_centroids), so the same
+               structural class and the same failure mode.
+    header     156 B at offset 0. Not per-query — load() parses it into scalars once — but the
+               scrub runs immediately before deserialize, which is when a load-time check
+               wants to run, and an 8 KB device row anchored in the centroids destroys it.
+    Maintains R=3 copies per region. Per-query majority-vote + CRC verify → repair buf + copies.
     Flags irrecoverable (≥ majority copies corrupted same way: CRC of majority ≠ clean).
     With cfg["cliff_scrub"]: vote failure instead triggers a FULL reload of buf + all
     replicas from the persistent clean source (adapter file read, never cached), plus a
@@ -55,6 +61,8 @@ SMOKE_CFG = {
     "cliff_scrub": False,      # vote-failure-triggered full reload from the clean source
     "anchor_every": 10,        # low-frequency anchor check period in ticks (0 = off);
                                # only active when cliff_scrub is on
+    "cliff_regions": ("rotation",),   # global regions the cliff layer replicates and votes on,
+                                      # in scrub order; see the module docstring for the set.
 }
 FULL_CFG = {**SMOKE_CFG, "ticks": 100}
 
@@ -83,6 +91,46 @@ def replica_lane_seed(root_seed, tick, r):
 # lane change MUST bump this string so stale-lane inputs are rejected rather than silently mixed.
 REPLICA_LANE = "SeedSequence([root,tick,r+1]) (phase3_e5_recovery.replica_lane_seed)"
 
+# Per-region cliff counters. The flat cliff_* keys in counters() are the sum of these across
+# every protected region, so existing consumers (E6's classify_outcome, the E5 timeline) keep
+# reading exactly what they read when the rotation was the only protected region.
+CLIFF_COUNTERS = {"checked": 0, "repaired": 0, "irrecoverable": 0, "reload_triggered": 0,
+                  "vote_fail_reloads": 0, "anchor_checked": 0, "anchor_mismatch": 0}
+
+# Byte popcount LUT for the vote's repaired-bit accounting (see _majority_vote).
+_POPCNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint16)
+
+
+def _majority_vote(copies, buf_region):
+    """Bitwise majority across R replicas, plus the count of bits that disagree with it.
+
+    Returns (majority uint8[bl], repaired_bits). `repaired_bits` counts every bit of every
+    copy AND of buf_region that differs from the majority — the accounting the original
+    per-bit loop did, preserved exactly because test_e3c_e5 asserts on the resulting
+    `cliff_repaired` and E6's classify_outcome keys `repaired` off it.
+
+    R==3 needs no bit unpacking: (a&b)|(b&c)|(a&c) sets exactly the bits where at least 2 of
+    3 agree, which is the loop's `votes > R//2`. That matters because the centroids are 8 KB
+    against the rotation's 64, so the loop's bl*8*R iterations went from 1,536 to 196,608 on
+    a per-query path. Other R fall back to unpackbits — SMOKE_CFG["R"] is configurable, so
+    this path has to stay correct, not merely present.
+    """
+    R = len(copies)
+    if R == 3:
+        a, b, c = copies
+        majority = (a & b) | (b & c) | (a & c)
+    else:
+        bits = np.unpackbits(np.stack(copies), axis=1)          # (R, bl*8)
+        majority = np.packbits(bits.sum(axis=0) > R // 2)
+    # The steady state is undamaged, so gate the popcount on `.any()`: that is a cheap
+    # early-exiting scan, where the LUT gather is 8 KB of indexed loads per array.
+    repaired = 0
+    for arr in (*copies, buf_region):
+        diff = arr ^ majority
+        if diff.any():
+            repaired += int(_POPCNT[diff].sum())
+    return majority, repaired
+
 
 class RecoveryGuard:
     """Two-layer + bounds-check recovery guard for a RaBitQ index buffer.
@@ -100,17 +148,16 @@ class RecoveryGuard:
         hdr = rmap["header"]
         self._cur_element_count = int(hdr["cur_element_count"])
 
-        # Cliff state
-        self._rot_region = self._find_region("rotation")    # (byte_start, byte_len)
-        self._rot_copies = []
-        self._rot_clean_crc = None
-        self._cliff_checked = 0
-        self._cliff_repaired = 0
-        self._cliff_irrecoverable = 0
-        self._cliff_reload_triggered = 0
-        self._cliff_vote_fail_reloads = 0
-        self._cliff_anchor_checked = 0
-        self._cliff_anchor_mismatch = 0
+        # Cliff state. One entry per protected global region, in scrub order. The default is
+        # ("rotation",) so every caller written before the centroids were covered keeps its
+        # exact previous behaviour; E6/E9 take the set from --cliff-regions.
+        names = tuple(cfg.get("cliff_regions") or ("rotation",))
+        if len(set(names)) != len(names):
+            raise ValueError(f"duplicate entries in cliff_regions: {names}")
+        self._cliff_regions = {n: self._find_region(n) for n in names}   # name -> (start, len)
+        self._cliff_copies = {n: [] for n in names}                      # name -> [uint8 array]
+        self._cliff_crc = {n: None for n in names}                       # name -> clean CRC32
+        self._cliff_ctr = {n: dict(CLIFF_COUNTERS) for n in names}
         if cfg.get("cliff_scrub", False) and not hasattr(adapter, "read_serialized_range"):
             raise RuntimeError(
                 "REPORT-AND-STOP: cliff_scrub needs adapter.read_serialized_range (persistent "
@@ -138,17 +185,55 @@ class RecoveryGuard:
                  f"(every CRC failure escalates straight to EB-fallback).")
 
     # ------------------------------------------------------------------
+    # Rotation aliases + aggregate counters
+    #
+    # The cliff layer was rotation-only until the centroids joined it, and both the tests and
+    # --inject-replicas address the rotation's state directly (including ASSIGNING to
+    # _rot_clean_crc, which is how the anchor tests forge a wrong-but-consistent vote). These
+    # keep that surface intact while the storage underneath is per-region.
+    # ------------------------------------------------------------------
+
+    @property
+    def _rot_region(self):
+        return self._cliff_regions["rotation"]
+
+    @property
+    def _rot_copies(self):
+        return self._cliff_copies["rotation"]
+
+    @property
+    def _rot_clean_crc(self):
+        return self._cliff_crc["rotation"]
+
+    @_rot_clean_crc.setter
+    def _rot_clean_crc(self, value):
+        self._cliff_crc["rotation"] = value
+
+    def _cliff_total(self, key):
+        """One cliff counter summed over every protected region."""
+        return sum(c[key] for c in self._cliff_ctr.values())
+
+    _cliff_checked = property(lambda self: self._cliff_total("checked"))
+    _cliff_repaired = property(lambda self: self._cliff_total("repaired"))
+    _cliff_irrecoverable = property(lambda self: self._cliff_total("irrecoverable"))
+    _cliff_reload_triggered = property(lambda self: self._cliff_total("reload_triggered"))
+    _cliff_vote_fail_reloads = property(lambda self: self._cliff_total("vote_fail_reloads"))
+    _cliff_anchor_checked = property(lambda self: self._cliff_total("anchor_checked"))
+    _cliff_anchor_mismatch = property(lambda self: self._cliff_total("anchor_mismatch"))
+
+    # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------
 
     def init_from_clean(self, clean_buf):
-        """Snapshot rotation copies + CRC, ex-data CRCs + clean snapshot, and full clean buf."""
+        """Snapshot cliff copies + CRCs, ex-data CRCs + clean snapshot, and full clean buf."""
         self._clean_buf = np.array(clean_buf, dtype=np.uint8)   # authoritative for OOB restore
         R = int(self._cfg.get("R", 3))
-        bs, bl = self._rot_region
-        rot_bytes = bytes(clean_buf[bs: bs + bl])
-        self._rot_copies = [np.frombuffer(rot_bytes, dtype=np.uint8).copy() for _ in range(R)]
-        self._rot_clean_crc = zlib.crc32(rot_bytes)
+        for name, (bs, bl) in self._cliff_regions.items():
+            region_bytes = bytes(clean_buf[bs: bs + bl])
+            self._cliff_copies[name] = [np.frombuffer(region_bytes, dtype=np.uint8).copy()
+                                        for _ in range(R)]
+            self._cliff_crc[name] = zlib.crc32(region_bytes)
 
         if self._ex_region is not None:
             exs, exl = self._ex_region
@@ -243,6 +328,9 @@ class RecoveryGuard:
             "cliff_vote_fail_reloads": self._cliff_vote_fail_reloads,
             "cliff_anchor_checked": self._cliff_anchor_checked,
             "cliff_anchor_mismatch": self._cliff_anchor_mismatch,
+            # Per-region breakdown. The flat keys above are these summed; with two protected
+            # regions a reader otherwise cannot tell which one a repair belongs to.
+            "cliff_by_region": {n: dict(c) for n, c in self._cliff_ctr.items()},
             "slope_checked": self._slope_checked,
             "slope_failed": self._slope_failed,
             "slope_reloaded": self._slope_reloaded,
@@ -256,100 +344,97 @@ class RecoveryGuard:
     # ------------------------------------------------------------------
 
     def _scrub_cliff(self, buf):
-        """Majority-vote across R rotation copies; repair copies + buf; verify CRC."""
-        R = len(self._rot_copies)
+        """Scrub every protected cliff region, in the order they were configured."""
+        for name in self._cliff_regions:
+            self._scrub_cliff_region(buf, name)
+
+    def _scrub_cliff_region(self, buf, name):
+        """Majority-vote across R copies of one region; repair copies + buf; verify CRC."""
+        copies = self._cliff_copies[name]
+        R = len(copies)
         if R == 0:
             return
-        bs, bl = self._rot_region
-        majority = np.zeros(bl, dtype=np.uint8)
+        bs, bl = self._cliff_regions[name]
+        ctr = self._cliff_ctr[name]
 
-        repaired_bits = 0
-        for i in range(bl):
-            for j in range(8):
-                votes = sum(1 for r in range(R) if (self._rot_copies[r][i] >> j) & 1)
-                bit_val = 1 if votes > R // 2 else 0
-                if bit_val:
-                    majority[i] |= (1 << j)
-                # Count bits that differ from majority (across all copies + buf)
-                for r in range(R):
-                    if ((self._rot_copies[r][i] >> j) & 1) != bit_val:
-                        repaired_bits += 1
-                buf_bit = (buf[bs + i] >> j) & 1
-                if buf_bit != bit_val:
-                    repaired_bits += 1
-        self._cliff_checked += bl * 8
+        majority, repaired_bits = _majority_vote(
+            copies, np.asarray(buf[bs: bs + bl], dtype=np.uint8))
+        ctr["checked"] += bl * 8
 
         # Verify the majority-vote result against the authoritative clean CRC BEFORE writing it.
         # If it fails, >= majority copies were corrupted the same way: flag irrecoverable and do
         # NOT write the wrong majority into buf (plan §5a: detect, never silently serve a wrong
         # value). buf is left as-is for the search to proceed under the loud failure flag.
-        if zlib.crc32(bytes(majority)) != self._rot_clean_crc:
+        if zlib.crc32(bytes(majority)) != self._cliff_crc[name]:
             if self._cfg.get("cliff_scrub", False):
                 # Vote failure = action signal (same philosophy as slope CRC-fail -> fallback
                 # and bounds-fail -> skip): full reload of buf + ALL replicas from the clean
                 # source. Not counted as irrecoverable — the event is recovered. Return
                 # immediately: the computed majority/repaired_bits are stale and wrong.
-                _log(f"[e5] cliff vote failure (≥{(R+1)//2} copies corrupted same way) "
-                     f"→ full reload from clean source")
-                self._cliff_vote_fail_reloads += 1
-                self._reload_cliff(buf)
+                _log(f"[e5] cliff vote failure on {name} (≥{(R+1)//2} copies corrupted same "
+                     f"way) → full reload from clean source")
+                ctr["vote_fail_reloads"] += 1
+                self._reload_cliff(buf, name)
                 return
-            self._cliff_irrecoverable += 1
-            _log(f"[e5] IRRECOVERABLE: majority-vote rotation result fails clean CRC "
+            ctr["irrecoverable"] += 1
+            _log(f"[e5] IRRECOVERABLE: majority-vote {name} result fails clean CRC "
                  f"(≥{(R+1)//2} copies corrupted same way); buf left unrepaired, not served as fixed")
             return
 
         if repaired_bits:
-            self._cliff_repaired += repaired_bits
+            ctr["repaired"] += repaired_bits
             buf[bs: bs + bl] = majority
             for r in range(R):
-                np.copyto(self._rot_copies[r], majority)
+                np.copyto(copies[r], majority)
 
-    def _reload_cliff(self, buf):
-        """Full reload of the rotation (main buf + ALL R replicas) from the clean source.
+    def _reload_cliff(self, buf, name="rotation"):
+        """Full reload of one cliff region (main buf + ALL R replicas) from the clean source.
 
         The clean source is read fresh from persistent storage every call (adapter file
-        offset, 64 B) — never cached: a DRAM cache of the clean rotation would just be a
-        fourth replica subject to the same fault process. Full-region reload (not just the
-        failed bit) is deliberate: at first vote failure the replicas already carry other
+        offset) — never cached: a DRAM cache of the clean bytes would just be a fourth
+        replica subject to the same fault process. That is why __init__ refuses cliff_scrub
+        without adapter.read_serialized_range, and it is why this holds for the 8 KB
+        centroids exactly as it held for the 64-byte rotation. Full-region reload (not just
+        the failed bit) is deliberate: at first vote failure the replicas already carry other
         accumulated, not-yet-aligned damage that would re-trigger immediately.
 
         Writes are IN PLACE (np.copyto / slice assign): the runner's replica corruptors
         and TemporalCorruptor hold references to these exact arrays.
         """
-        bs, bl = self._rot_region
+        bs, bl = self._cliff_regions[name]
         clean = self._adapter.read_serialized_range(bs, bl)
         buf[bs: bs + bl] = clean
-        for r in range(len(self._rot_copies)):
-            np.copyto(self._rot_copies[r], clean)
+        for cp in self._cliff_copies[name]:
+            np.copyto(cp, clean)
         # Re-derive the CRC anchor from the freshly read clean bytes: this self-heals a
         # corrupted in-memory anchor (the CRC itself lives in DRAM and can be hit too).
-        self._rot_clean_crc = zlib.crc32(bytes(clean))
-        self._cliff_reload_triggered += 1
+        self._cliff_crc[name] = zlib.crc32(bytes(clean))
+        self._cliff_ctr[name]["reload_triggered"] += 1
         assert np.array_equal(np.asarray(buf[bs: bs + bl], dtype=np.uint8), clean), \
-            "post-reload verify failed: buf rotation != clean source"
+            f"post-reload verify failed: buf {name} != clean source"
 
     def cliff_anchor_if_due(self, buf, tick):
-        """Low-frequency anchor check: every anchor_every ticks, byte-compare the main
-        buf's rotation region against the clean source read from persistent storage.
+        """Low-frequency anchor check: every anchor_every ticks, byte-compare each protected
+        cliff region in the main buf against the clean source read from persistent storage.
 
         Backstop for the theoretical blind spot of the trigger path: a wrong majority
         that slips past the CRC verify (CRC collision, or a corrupted in-memory CRC
         anchor) produces no vote-failure signal. This check depends ONLY on persistent
-        storage — deliberately not on _rot_clean_crc.
+        storage — deliberately not on the in-memory CRC anchors.
         """
         if not self._cfg.get("cliff_scrub", False):
             return
         every = int(self._cfg.get("anchor_every", 10))
         if every <= 0 or tick <= 0 or tick % every != 0:
             return
-        bs, bl = self._rot_region
-        clean = self._adapter.read_serialized_range(bs, bl)
-        self._cliff_anchor_checked += 1
-        if not np.array_equal(np.asarray(buf[bs: bs + bl], dtype=np.uint8), clean):
-            self._cliff_anchor_mismatch += 1
-            _log(f"[e5] cliff anchor mismatch at tick {tick} → full reload from clean source")
-            self._reload_cliff(buf)
+        for name, (bs, bl) in self._cliff_regions.items():
+            clean = self._adapter.read_serialized_range(bs, bl)
+            self._cliff_ctr[name]["anchor_checked"] += 1
+            if not np.array_equal(np.asarray(buf[bs: bs + bl], dtype=np.uint8), clean):
+                self._cliff_ctr[name]["anchor_mismatch"] += 1
+                _log(f"[e5] cliff anchor mismatch on {name} at tick {tick} "
+                     f"→ full reload from clean source")
+                self._reload_cliff(buf, name)
 
     # ------------------------------------------------------------------
     # Slope layer internals

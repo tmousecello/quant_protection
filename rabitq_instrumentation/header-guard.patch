@@ -1,0 +1,261 @@
+Header guard for HierarchicalNSW::load() — turn a corrupted index header into a loud failure
+instead of a malloc on garbage.
+
+PROBLEM. load() reads all 21 header fields with no validation and then sizes two allocations
+directly from them:
+
+    centroids_memory_   = malloc(num_cluster_ * padded_dim_ * sizeof(float));
+    data_level0_memory_ = malloc(max_elements_ * size_data_per_element_);
+
+followed by reads of those lengths. A flip in any count or size field is therefore not a wrong
+answer, it is an allocation on a value that was never written — the process dies inside load(),
+before a single query runs, with no indication of which field was wrong.
+
+This is reached far more often than "someone corrupted the header" suggests. The header is only
+156 bytes, but the centroid block starts at byte 156, and the DRAM fault model's 8 KB device row
+is aligned to the buffer start — so a row anchored anywhere in the centroids covers [0, 8192) and
+destroys the entire header on its way. In the E6 sweep that cell crashed 29 of 30 seeds WITH all
+three protection layers on, and the crash is the header, not the centroid bytes. Measured
+directly: protecting the centroids alone leaves 29 of 30 still crashing; adding the header takes
+it to 0 of 30.
+
+FIX. Eight checks between the last field read and the first malloc, each an invariant of what
+save() emits, so none of them can reject a legitimate index:
+
+  1/8 padded_dim_ == dim_ rounded up to a multiple of 64 (the FhtKacRotator's requirement);
+  2/8 0 < cur_element_count_ <= max_elements_, enterpoint_node_ < cur_element_count_,
+      0 <= maxlevel_ <= 64, num_cluster_ > 0;
+  3/8 maxM_ == M_ and maxM0_ == 2*M_, the degrees save() derived from M_;
+  4/8 size_links_level0_ and size_links_per_element_ follow from those degrees;
+  5/8 size_bin_data_ and size_ex_data_ follow from padded_dim_ and ex_bits_ (data_layout.hpp);
+  6/8 label_offset_ / offsetBinData_ / offsetExData_ / size_data_per_element_ are the running
+      sum of those block sizes;
+  7/8 mult_ == 1/log(M_), the level-assignment constant save() derived from M_;
+  8/8 the global one: save() writes header, centroids, level0, one [uint32 len][len bytes]
+      record per element, then the rotation. Everything but the records has a closed form, so
+      the residual IS the record block — and it cannot be smaller than the one length word per
+      element save() always emits. Any high-bit flip in a count or size field overshoots here.
+
+COVERAGE, measured not asserted. phase3_e10_header.py enumerates all 156*8 = 1,248 single-bit
+header flips against this predicate (artifacts/phase3/e10/header_coverage.json):
+
+    header-only, i.e. what this patch can check   1,129 / 1,248 = 90.46%
+    + walking the record stream to EOF            1,172 / 1,248 = 93.91%
+
+The 119 header-only escapes are classified by what they would actually DO, because "undetected"
+and "dangerous" are not the same thing:
+
+   19  desync         move a computed offset (num_cluster_ up, cur_element_count_ down), so the
+                      sequential read misaligns and every later record plus the rotation come
+                      from the wrong place;
+   24  level_overrun  send the descent to a level that was never allocated — 4 by raising
+                      maxlevel_, and 20 by moving enterpoint_node_ to a DIFFERENT VALID element
+                      id. The second is the one that most looks harmless and is not: on this
+                      index exactly one element carries a maxlevel*size_links_per_element record
+                      (the length histogram is {0: 937001, 68: 59126, 136: 3626, 204: 234,
+                      272: 12, 340: 1}), so any other id sends get_linklist past the end of a
+                      shorter link list. Replayed against the stock binary: SIGSEGV.
+   25  alloc          change only how much room max_elements_ reserves; load and search are
+                      byte-identical;
+   51  benign         land on a value a legitimate index could hold AND that load() acts on
+                      identically, e.g. a lower maxlevel_.
+
+All 43 of the dangerous ones close when the upper-link record stream is walked to EOF, which is
+what framing-guard.patch already does. That walk pins three things a header-only check cannot:
+the stream must END exactly where the rotation begins, the LONGEST record must equal
+maxlevel*size_links_per_element, and the ENTRY POINT's own record must be that longest one. The
+two guards are therefore complementary rather than alternatives — this one stops the malloc
+before it happens, that one proves the stream the header described is the stream the file
+contains. The remaining 76 are values save() itself could have written, and rejecting them would
+mean rejecting legitimate indexes, which is the bar framing-guard.patch set for its own bound.
+
+SCOPE. This DETECTS; it does not repair. Repair needs a pristine copy of the header, and on this
+path there is none — the file being loaded IS the corrupted one. A caller that still holds the
+original index on durable storage can re-read [0, 156) and fix it in place; that is what the
+experiment harness does, by putting `header` in the cliff layer's replicated-region list
+alongside the rotation and the centroids. The guard supplies the signal, not the recovery policy.
+
+The predicate is stated once, in Python, at qp/rabitq/layout.py (HEADER_CONSTRAINTS), and this
+patch mirrors it check for check so the two cannot drift apart unnoticed.
+
+REBUILD-VERIFIED (artifacts/phase3/e10/header_guard_rebuild.json). Built from a scratch copy of
+the library; the production bin/ was left untouched so concurrent experiments were unaffected.
+Compared against the stock binary on identical bytes, ef=64, k=10:
+
+  |                          | stock                        | guarded    |
+  |--------------------------|------------------------------|------------|
+  | clean recall@10          | 0.95035                      | 0.95035    |
+  | clean top-10 ids         | sha256[:16] fbe27be5c4bd6264 | IDENTICAL  |
+  | load+search wall, med/10 | 0.7129 s                     | 0.7111 s   |
+
+The measured difference is -0.0018 s (-0.25%), i.e. the guarded binary came out nominally faster.
+That is noise, not a speed-up: the stock binary's own run-to-run spread is 0.0258 s, fourteen
+times the difference. The honest statement is that the cost is below the measurement floor, which
+is what ~20 integer comparisons executed ONCE per load should look like — unlike the framing
+guard's +0.75%, which is 4 comparisons per element across 1,000,000 elements.
+
+Replaying one high-bit flip into each of the 18 load-bearing fields:
+
+  13  rejected by this guard, with a diagnostic naming the field and the value
+   1  rejected earlier by existing code (ex_bits_, via select_excode_ipfunc)
+   3  crash identically to the stock binary — num_cluster_ (SIGABRT), maxlevel_ (SIGABRT),
+      enterpoint_node_ (SIGSEGV): exactly the desync/level_overrun classes the coverage
+      analysis predicts a header-only check cannot close
+   1  loads and searches normally at recall 0.95035 — max_elements_ raised, a legitimate value
+
+Four control flips outside the header (centroids, level0 payload, upper-link payload, rotation)
+all load and search without triggering the guard, so it does not over-trigger. The rotation
+control drops recall to 0.82902 while loading cleanly, which is correct: that damage is the
+cliff layer's business, not this guard's.
+
+CAVEAT ON THE FAILURE FORM, inherited from framing-guard.patch: the throw is uncaught in
+exp_dumpids, so the process ends via std::terminate (exit -6) with the message on stderr. That is
+loud and diagnosable, but a caller wanting graceful degradation should wrap load() in try/catch.
+
+Apply from the RaBitQ-Library root, on top of library-changes.patch and recovery-changes.patch:
+  git apply /path/to/header-guard.patch
+
+--- a/include/rabitqlib/index/hnsw/hnsw.hpp
++++ b/include/rabitqlib/index/hnsw/hnsw.hpp
+@@ -8,11 +8,13 @@
+ #include <cassert>
+ #include <chrono>  // quant_protection: load-time CRC scan timing (fi_crc_scan_ns_)
+ #include <cstddef>
++#include <cmath>
+ #include <cstdlib>
+ #include <fstream>
+ #include <iostream>
+ #include <memory>
+ #include <mutex>
++#include <string>
+ #include <unordered_map>
+ #include <vector>
+ 
+@@ -807,6 +809,127 @@
+     input.read(reinterpret_cast<char*>(&mult_), sizeof(double));
+     input.read(reinterpret_cast<char*>(&ef_construction_), sizeof(size_t));
+ 
++    // ---------------------------------------------------------------------------------
++    // HEADER GUARD. Every field above was read with no validation, and the two mallocs
++    // below size themselves from those fields. A flip in a count or a size field is not a
++    // wrong answer, it is an allocation on garbage: malloc(num_cluster_ * padded_dim_ * 4)
++    // or malloc(max_elements_ * size_data_per_element_) on a value that was never written.
++    // That is why an 8 KB device row anchored in the centroid block crashes rather than
++    // degrades -- the block starts at byte 156, so a buffer-aligned row covers [0, 8192)
++    // and takes all 156 header bytes with it on the way.
++    //
++    // Every check below is an invariant of what save() emits, so none of them can reject a
++    // legitimate index -- the same bar framing-guard.patch set for its length bound. The
++    // predicate is stated once in Python at qp/rabitq/layout.py (HEADER_CONSTRAINTS) and
++    // measured exhaustively over all 1,248 single-bit header flips by
++    // phase3_e10_header.py, so the two cannot drift apart silently.
++    //
++    // NOTE ON SCOPE. This DETECTS; it does not repair. Repair needs a pristine copy of the
++    // header, and on this path there is none: the file being loaded IS the corrupted one.
++    // A caller holding the original index on durable storage can re-read [0, 156) and fix
++    // it in place, which is what the experiment harness does. The guard supplies the
++    // signal, not the recovery policy.
++    {
++        const std::streampos after_header = input.tellg();
++        input.seekg(0, std::ios::end);
++        const std::streamoff file_size = input.tellg();
++        input.seekg(after_header);
++        if (!input) {
++            throw std::runtime_error("Corrupt index: cannot size the file to validate the header");
++        }
++
++        auto reject = [](const std::string& what) {
++            throw std::runtime_error("Corrupt index: implausible header -- " + what);
++        };
++        auto round_up_64 = [](size_t x) { return ((x + 63) / 64) * 64; };
++
++        // 1/8 geometry: padded_dim_ is dim_ rounded up for the FhtKacRotator.
++        if (dim_ == 0 || padded_dim_ != round_up_64(dim_)) {
++            reject("padded_dim " + std::to_string(padded_dim_) + " is not dim " +
++                   std::to_string(dim_) + " rounded up to a multiple of 64");
++        }
++        // 2/8 counts.
++        if (cur_element_count_ == 0 || cur_element_count_ > max_elements_) {
++            reject("cur_element_count " + std::to_string(cur_element_count_) +
++                   " outside (0, max_elements=" + std::to_string(max_elements_) + "]");
++        }
++        if (enterpoint_node_ >= cur_element_count_) {
++            reject("enterpoint_node " + std::to_string(enterpoint_node_) + " >= " +
++                   std::to_string(cur_element_count_));
++        }
++        if (maxlevel_ < 0 || maxlevel_ > 64) {
++            reject("maxlevel " + std::to_string(maxlevel_) + " outside [0, 64]");
++        }
++        if (num_cluster_ == 0) {
++            reject("num_cluster is 0");
++        }
++        // 3/8 degree parameters: save() wrote maxM_ = M_ and maxM0_ = 2*M_.
++        if (M_ == 0 || maxM_ != M_ || maxM0_ != 2 * M_) {
++            reject("degree parameters M=" + std::to_string(M_) + " maxM=" +
++                   std::to_string(maxM_) + " maxM0=" + std::to_string(maxM0_) +
++                   " violate maxM==M and maxM0==2*M");
++        }
++        // 4/8 link-block sizes follow from the degrees (hnsw.hpp save-side arithmetic).
++        if (size_links_level0_ != maxM0_ * sizeof(PID) + sizeof(PID)) {
++            reject("size_links_level0 " + std::to_string(size_links_level0_) +
++                   " != maxM0*sizeof(PID)+sizeof(PID)");
++        }
++        if (size_links_per_element_ != maxM_ * sizeof(PID) + sizeof(PID)) {
++            reject("size_links_per_element " + std::to_string(size_links_per_element_) +
++                   " != maxM*sizeof(PID)+sizeof(PID)");
++        }
++        // 5/8 quantization block sizes follow from padded_dim_ and ex_bits_ (data_layout.hpp).
++        if (ex_bits_ > 16) {
++            reject("ex_bits " + std::to_string(ex_bits_) + " > 16");
++        }
++        const size_t want_bin = padded_dim_ / 8 + 3 * sizeof(float);
++        const size_t want_ex =
++            ex_bits_ > 0 ? padded_dim_ * ex_bits_ / 8 + 2 * sizeof(float) : 0;
++        if (size_bin_data_ != want_bin || size_ex_data_ != want_ex) {
++            reject("size_bin_data/size_ex_data " + std::to_string(size_bin_data_) + "/" +
++                   std::to_string(size_ex_data_) + " != " + std::to_string(want_bin) + "/" +
++                   std::to_string(want_ex) + " for this padded_dim/ex_bits");
++        }
++        // 6/8 element offsets are a running sum of the block sizes above.
++        if (label_offset_ != size_links_level0_ + sizeof(PID) ||
++            offsetBinData_ != size_links_level0_ + 2 * sizeof(PID) ||
++            offsetExData_ != offsetBinData_ + size_bin_data_) {
++            reject("element offsets label/bin/ex " + std::to_string(label_offset_) + "/" +
++                   std::to_string(offsetBinData_) + "/" + std::to_string(offsetExData_) +
++                   " are not the running sum of the block sizes");
++        }
++        if (size_data_per_element_ !=
++            size_links_level0_ + 2 * sizeof(PID) + size_bin_data_ + size_ex_data_) {
++            reject("size_data_per_element " + std::to_string(size_data_per_element_) +
++                   " != links+ids+bin+ex");
++        }
++        // 7/8 mult_ = 1/log(M), the level-assignment constant save() derived from M_.
++        const double want_mult = 1.0 / std::log(static_cast<double>(M_));
++        if (!(std::abs(mult_ - want_mult) <= 1e-9 * std::max(1.0, std::abs(want_mult)))) {
++            reject("mult " + std::to_string(mult_) + " != 1/log(M) = " +
++                   std::to_string(want_mult));
++        }
++        // 8/8 THE GLOBAL ONE. save() writes header, centroids, level0, one
++        // [uint32 len][len bytes] record per element, then the rotation. Everything but the
++        // records has a closed form, so the residual IS the record block -- and it cannot be
++        // smaller than the one length word per element that save() always emits. Any high-bit
++        // flip in a count or size field overshoots the file here.
++        const size_t centroid_bytes = num_cluster_ * padded_dim_ * sizeof(float);
++        const size_t level0_bytes = cur_element_count_ * size_data_per_element_;
++        const size_t rotation_bytes = 4 * padded_dim_ / 8;
++        const size_t fixed = static_cast<size_t>(after_header) + centroid_bytes + level0_bytes +
++                             rotation_bytes;
++        if (static_cast<std::streamoff>(fixed) > file_size ||
++            file_size - static_cast<std::streamoff>(fixed) <
++                static_cast<std::streamoff>(sizeof(unsigned int) * cur_element_count_)) {
++            reject("the blocks account for " + std::to_string(fixed) + " bytes plus at least " +
++                   std::to_string(sizeof(unsigned int) * cur_element_count_) +
++                   " of upper-link length words, but the file is only " +
++                   std::to_string(static_cast<long long>(file_size)) + " bytes");
++        }
++    }
++    // ------------------------------------------------------------------ end header guard
++
+     centroids_memory_ =
+         reinterpret_cast<char*>(malloc(num_cluster_ * padded_dim_ * sizeof(float)));
+ 

@@ -228,6 +228,11 @@ def main(argv=None, return_summary=False):
                     help=f"comma-separated subset of {list(STRATA)} — shards the sweep across "
                          f"processes. Cell seeds are (root, shape, stratum, i)-derived, so a "
                          f"shard's anchors and flips match the full sweep's. Pair with --out-tag.")
+    ap.add_argument("--cliff-regions", dest="cliff_regions",
+                    type=csv_list("cliff region", e6.CLIFF_REGIONS_ALLOWED), default=None,
+                    help=f"comma-separated subset of {list(e6.CLIFF_REGIONS_ALLOWED)} that arm "
+                         f"ON replicates and majority-votes (default "
+                         f"{list(e6.CLIFF_REGIONS_DEFAULT)}). Same flag and same meaning as E6.")
     ap.add_argument("--seed", type=int, default=config.SEED, help="root seed")
     ap.add_argument("--ef", type=int, default=None,
                     help=f"search ef (default {FULL['ef']} — the fast operating point; E6 used "

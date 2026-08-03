@@ -39,6 +39,12 @@ from qp.rabitq.registry import get_adapter, adapter_name
 PATTERNS = ("uniform_accum", "clustered_accum", "cross_row_accum", "burst_accum")
 RMIN_GRID = (0.97, 0.95, 0.90, 0.85, 0.80, 0.70, 0.60)
 HEADLINE_RMIN = 0.90
+
+# Global regions the cliff layer replicates, and therefore the ones the rent has to pay for.
+# Kept in sync with phase3_e6_shapes.CLIFF_REGIONS_ALLOWED, which is what the sweeps actually
+# ran with; changing one without the other would make the reported cost describe a different
+# configuration from the reported outcomes.
+CLIFF_PROTECTED = ("rotation", "centroids", "header")
 CHECK_TOL = 0.01
 
 # Default artifact locations (all overridable via CLI)
@@ -341,7 +347,12 @@ def synthesize(args):
     rmap = adapter.region_map()
     n_elem = int(rmap["header"]["cur_element_count"])
     total_bytes = int(rmap["total_bytes"])
-    cliff_cost = cost.mem_cost(rmap, {"rotation": {"mult": 3, "checksum_bytes": 4}})
+    # The cliff layer's rent. All three are global structures read on every load or every query,
+    # so each carries R=3 copies plus one CRC anchor. The centroids dominate the total at 8 KB
+    # against the rotation's 64 and the header's 156 — and that 8 KB is num_cluster*padded_dim*4,
+    # so it is a property of THIS corpus (SIFT1M uses 16 clusters), not a constant.
+    cliff_cost = cost.mem_cost(rmap, {r: {"mult": 3, "checksum_bytes": 4}
+                                      for r in CLIFF_PROTECTED})
     # slope detection: per-element CRC manifest (crc_manifest.py format: 64-B header
     # + 16 B/entry), lives beside the index — same cost for drop and EB.
     manifest_bytes = 64 + 16 * n_elem

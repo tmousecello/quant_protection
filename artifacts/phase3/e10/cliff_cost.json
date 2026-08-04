@@ -1,0 +1,33 @@
+{
+  "protected_bytes": 8412,
+  "region_bytes": {
+    "rotation": 64,
+    "centroids": 8192,
+    "header": 156
+  },
+  "scrub_us": {
+    "rotation": 4.696687596151605,
+    "centroids": 7.765579601982608,
+    "header": 4.827206797199324,
+    "all three": 17.339904798427597
+  },
+  "fit_intercept_us": 4.688792126316365,
+  "fit_slope_us_per_byte": 0.00019415783384903133,
+  "dispatch_us": 14.066376378949094,
+  "bytework_us": 1.6332556983380515,
+  "crc_us": 1.2516631197649986,
+  "predicted_us": 16.951295197052143,
+  "measured_us": 17.339904798427597,
+  "reconcile_error_pct": -2.2411288060283514,
+  "floor_us": 2.88491881810305,
+  "share_of_search": {
+    "64": {
+      "measured_pct": 38.54168659352655,
+      "floor_pct": 6.412355674823405
+    },
+    "2000": {
+      "measured_pct": 1.233358095356573,
+      "floor_pct": 0.20519939527445213
+    }
+  }
+}

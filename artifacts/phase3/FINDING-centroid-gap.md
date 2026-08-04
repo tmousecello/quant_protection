@@ -28,10 +28,12 @@ it was just hard-coded to the rotation. It now takes a region list
 Rent 5.7027% → **5.7086%** (the paper's `5.70\%` is unchanged). 427 tests pass. The rotation
 column is byte-identical to the archived baseline, so the vectorized vote is neutral.
 
-**Two things a reader should not skip:** the per-query cost is 0.23% of a search at ef=2000 but
-**7.3% at ef=64**, so §3.1's "disappears next to one graph traversal" needs a depth qualifier
-(§3 below); and the 8 KB is `num_cluster × padded_dim × 4` with SIFT1M using only 16 clusters,
-so it grows with the corpus (§5 below).
+**Two things a reader should not skip:** the scrub costs **17.3 µs** per call for the three
+regions, which is 1.2% of a search at ef=2000 but **38.5% at ef=64**, so §3.1's "disappears next
+to one graph traversal" needs a depth qualifier — and 81% of that is Python dispatch, not byte
+work, so the number to quote depends on which question is being asked (§3 below). The 8 KB is
+also `num_cluster × padded_dim × 4` with SIFT1M using only 16 clusters, so it grows with the
+corpus (§5 below).
 
 Which paper claims must change is listed in §7.
 
@@ -74,7 +76,7 @@ counter, no change to `classify_outcome`. The ablation is two values of one flag
 The per-bit triple loop in `_scrub_cliff` had to be vectorized first: `bl*8*R` went from 1,536
 iterations to 196,608 on a per-query path. `(a&b)|(b&c)|(a&c)` is exact for R=3; larger R falls
 back to `unpackbits`. Verified bit-identical to the old loop (majority **and** `repaired_bits`)
-across R ∈ {1..5}. Clean-case cost: 8.3 µs for the 8 KB block vs 6.4 µs for the 64-byte rotation.
+across R ∈ {1..5}. What it costs is §3.1.
 
 ## 3. Results
 
@@ -109,11 +111,58 @@ doing nothing.
 - **rotation regression: all 3 shapes match the archived baseline exactly.** The vectorized vote
   is neutral.
 - **`device_row × centroids` after the header guard: 0 crashes** (was 29).
-- **per-query cost of the 8 KB vote: 8.3 µs clean**, ~2 µs more than the 64-byte rotation, so the
-  CRC-only variant is not needed and §3.2's cost argument stands.
+- **per-query cost: see §3.1.** It is the one check that did not come out clean, and the CRC-only
+  variant should stay on the table rather than be dismissed.
 
 Attribution over the 300 protected evals of the full configuration: centroids acted in 120
 trials (932,919 bits), header in 30 (18,144 bits), rotation in 30 (90 bits).
+
+### 3.1 Per-query cost — and a correction
+
+An earlier revision of this document quoted two different numbers for this and computed its
+percentages from a third. All three are recorded here because the difference between them is the
+whole point:
+
+| number | what it actually measures |
+|---|---|
+| 8.3 µs | `_majority_vote` for the **centroids region alone** — one of three, not the whole scrub |
+| 3.27 µs | a **constructed** figure: the bare `(a&b)\|(b&c)\|(a&c)` timed in isolation, plus `zlib.crc32`. No code path does only that — `_majority_vote` also runs 4 × (XOR + `.any()`) |
+| **17.3 µs** | **`_scrub_cliff` end to end for all three protected regions.** This is the cost. |
+
+`bench_cliff_cost.py` now produces all of it in one run and gates that the parts add up to the
+whole, so the number cannot drift from its own decomposition again. Figures below are one run
+(`artifacts/phase3/e10/cliff_cost.json`); they move ~3% run to run.
+
+| component | µs | share |
+|---|---|---|
+| 3 × 4.69 numpy dispatch — **size-independent** | 14.07 | 81% |
+| 8,412 B × 0.199 µs/KB — the actual byte work | 1.63 | 9% |
+| `zlib.crc32` over the same bytes | 1.25 | 7% |
+| predicted / measured | 16.95 / **17.34** | reconciles to 2.2% |
+
+Slope and intercept come from fitting `_majority_vote` over 64 B … 64 KB:
+`cost = 4.69 µs + 0.199 µs/KB`.
+
+Against one search (search-only; load separated out by fitting wall across ef):
+
+| | ef=2000 (1,405.91 µs/query) | ef=64 (44.99 µs/query) |
+|---|---|---|
+| measured, as implemented | **1.23%** | **38.5%** |
+| size-dependent floor (1.63 + 1.25 = 2.88 µs) | 0.21% | 6.4% |
+
+**Which row to quote depends on the question.** The floor is what survives a C++/SIMD
+implementation; the measured row is what this harness does. Neither justifies the paper's current
+"comparing it disappears next to one graph traversal" without a depth qualifier: even at the
+floor it is 6.4% of a search at ef=64.
+
+A second earlier claim, that "cost scales with region count, not size", is also **wrong**. It
+rested on the coincidence `3 × 5.81 ≈ 17.53`. The slope fit shows a real size term of
+0.199 µs/KB. Dispatch overhead dominates it at 8.4 KB, but the size term is exactly what grows
+with `num_cluster` (§5), so it must not be dismissed.
+
+Caveat on all of the above: in E6/E9 the scrub runs once per *eval* — once per 10,000-query
+batch — not per query, so none of these numbers affect the outcome tables. The per-query framing
+is §3.2's design intent, not what the sweep measured.
 
 ### Cost
 
@@ -180,6 +229,10 @@ raised, a legitimate value). Four control flips outside the header do not trigge
 
 The 8 KB centroid figure is `num_cluster × padded_dim × 4`, and SIFT1M uses only **16 clusters**.
 On a larger corpus the block grows and the "replicate it, it is nearly free" argument weakens.
+It weakens in both directions, and §3.1 now quantifies one of them: memory grows linearly, and so
+does the vote's size-dependent term at 0.199 µs/KB. At 16 clusters that term is 9% of the scrub
+and easy to overlook; at 1,024 clusters the centroid block is 512 KB and the term alone is
+**101.8 µs** (measured extrapolation, `bench_cliff_cost.py`), which no search depth hides.
 §3.2's cost sentence should say what it scales with. Protecting the centroids puts this in front
 of a reviewer whether or not the work is done.
 
@@ -191,6 +244,7 @@ python -m pytest artifacts/phase3/tests/ -q     # 427 passed
 ./run_centroid_sweeps.sh                        # 10 shards, ~30 min wall
 python analyze_centroid_sweeps.py               # the tables above
 python phase3_e10_header.py                     # the 1,248-case enumeration
+python bench_cliff_cost.py                      # per-query cost + its decomposition
 ```
 
 Artifacts: `artifacts/phase3/e6/centroid_gap_summary.json`,
@@ -235,7 +289,9 @@ falsification checks produced; re-run the sweep if you need the per-trial `field
 **Must add as caveats**
 
 12. The 8 KB scales with `num_cluster × padded_dim` (§5 above).
-13. The per-query cost holds at depth but not at ef=64 (§3 above).
+13. The per-query cost holds at depth (0.21% of a search at ef=2000) but not at ef=64, where
+    even the byte-work floor is 6.4% (§3.1 above). §3.1's "comparing it disappears next to one
+    graph traversal" needs a depth qualifier, and the paper should say which quantity it means.
 14. The C++ guard detects only; repair needs a pristine source the loader does not have.
 
 **Pre-existing tension worth resolving while editing:** §3's budget list says "the 1.4\% framing
